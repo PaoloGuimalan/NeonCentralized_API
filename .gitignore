@@ -1,0 +1,24 @@
+# Django-specific files
+*.log
+*.pot
+*.pyc
+__pycache__/
+local_settings.py
+db.sqlite3
+
+# Virtual Environment
+.env
+venv/
+env/
+
+# IDE-specific files (e.g., PyCharm)
+.idea/
+
+# Operating System files
+.DS_Store
+Thumbs.db
+
+# Test coverage files
+.coverage
+.tox/
+.eggs/
