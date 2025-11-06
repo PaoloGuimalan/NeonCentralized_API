@@ -90,3 +90,27 @@ class Organization(models.Model):
 
     def __str__(self):
         return self.name
+    
+class Member(models.Model):
+    id = models.CharField(
+        max_length=150, default=uuid.uuid4, unique=True, blank=True, primary_key=True
+    )
+    account = models.ForeignKey(
+        Account,
+        null=False,
+        on_delete=models.DO_NOTHING,
+        related_name="user_as_member",
+    )
+    nickname = models.CharField(max_length=150, null=True, blank=True)
+    organization = models.ForeignKey(
+        Organization,
+        null=False,
+        on_delete=models.DO_NOTHING,
+    )
+    added_by = models.ForeignKey(
+        Account,
+        null=False,
+        on_delete=models.DO_NOTHING,
+        related_name="user_as_added_by",
+    )
+    date_joined = models.DateTimeField(null=True)
