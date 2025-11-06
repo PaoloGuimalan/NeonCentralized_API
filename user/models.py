@@ -114,3 +114,14 @@ class Member(models.Model):
         related_name="user_as_added_by",
     )
     date_joined = models.DateTimeField(null=True)
+
+class Verification(models.Model):
+    ver_id = models.CharField(
+        max_length=150, default=uuid.uuid4, unique=True, primary_key=True
+    )
+    user = models.ForeignKey(Account, null=False, on_delete=models.DO_NOTHING)
+    ver_code = models.CharField(
+        max_length=6, default=generate_random_digit(5), null=False
+    )
+    date_generated = models.DateTimeField(default=now)
+    is_used = models.BooleanField(default=False)
