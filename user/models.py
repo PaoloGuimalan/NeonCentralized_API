@@ -83,6 +83,12 @@ class Organization(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.ForeignKey(Account, null=False, on_delete=models.DO_NOTHING)
     updated_at = models.DateTimeField(auto_now=True)
+    access_key = models.CharField(
+        max_length=150, default=uuid.uuid4, unique=True
+    )
+    pin = models.CharField(
+        max_length=255, default=uuid.uuid4, unique=True
+    )
     address = models.CharField(max_length=255, blank=True)
     contact_email = models.EmailField(blank=True)
     phone_number = models.CharField(max_length=20, blank=True)
