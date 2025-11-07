@@ -70,6 +70,7 @@ INSTALLED_APPS = [
     "corsheaders",
     # Added apps
     "user",
+    "organization",
 ]
 
 MIDDLEWARE = [

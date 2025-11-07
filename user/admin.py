@@ -1,7 +1,5 @@
 from django.contrib import admin
-from .models import Account, Organization, Member, Verification
+from .models import Account, Verification
 
 admin.site.register(Account)
-admin.site.register(Organization)
-admin.site.register(Member)
 admin.site.register(Verification)
