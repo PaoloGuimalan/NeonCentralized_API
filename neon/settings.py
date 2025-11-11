@@ -71,6 +71,7 @@ INSTALLED_APPS = [
     # Added apps
     "user",
     "organization",
+    "llm",
 ]
 
 MIDDLEWARE = [
