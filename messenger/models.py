@@ -19,7 +19,7 @@ class Message(models.Model):
     ]
 
     message_id = models.UUIDField(default=uuid.uuid4, primary_key=True, null=False, unique=True)
-    pending_id = models.UUIDField(default=uuid.uuid4, primary_key=True, null=False, unique=True)
+    pending_id = models.UUIDField(default=uuid.uuid4, null=False, unique=True)
     conversation = models.ForeignKey(Conversation, on_delete=models.DO_NOTHING)
     sender = models.ForeignKey(Account, on_delete=models.DO_NOTHING)
     agent = models.ForeignKey(Agent, on_delete=models.DO_NOTHING)
@@ -27,7 +27,7 @@ class Message(models.Model):
     content = models.TextField(null=False)
     created_at = models.DateTimeField(auto_now=True)
     replying_to = models.ForeignKey('self', on_delete=models.DO_NOTHING, null=True, blank=True)
-    deleted_by = models.ManyToManyField(Account, related_name='conversation_deleted')
+    deleted_by = models.ForeignKey(Account, related_name='conversation_deleted_by', on_delete=models.DO_NOTHING, default=None)
     deleted_at = models.DateTimeField(auto_now=True)
     receivers = models.ManyToManyField(Account, related_name='conversation_receivers')
     seeners = models.ManyToManyField(Account, related_name='conversation_seeners')
