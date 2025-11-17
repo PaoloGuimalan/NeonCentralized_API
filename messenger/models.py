@@ -7,9 +7,9 @@ import uuid
 class Conversation(models.Model):
 
     conversation_id = models.UUIDField(default=uuid.uuid4, primary_key=True, null=False, unique=True)
-    organization = models.ForeignKey(Organization, null=False)
+    organization = models.ForeignKey(Organization, null=False, on_delete=models.DO_NOTHING)
     name = models.TextField(default=None)
-    created_by = models.ForeignKey(Account, null=False)
+    created_by = models.ForeignKey(Account, null=False, on_delete=models.DO_NOTHING)
 
 class Message(models.Model):
 
@@ -20,9 +20,9 @@ class Message(models.Model):
 
     message_id = models.UUIDField(default=uuid.uuid4, primary_key=True, null=False, unique=True)
     pending_id = models.UUIDField(default=uuid.uuid4, primary_key=True, null=False, unique=True)
-    conversation = models.ForeignKey(Conversation)
-    sender = models.ForeignKey(Account)
-    agent = models.ForeignKey(Agent)
+    conversation = models.ForeignKey(Conversation, on_delete=models.DO_NOTHING)
+    sender = models.ForeignKey(Account, on_delete=models.DO_NOTHING)
+    agent = models.ForeignKey(Agent, on_delete=models.DO_NOTHING)
     message_type = models.CharField(choices=MESSAGE_TYPE_CHOICES, null=False)
     content = models.TextField(null=False)
     created_at = models.DateTimeField(auto_now=True)
