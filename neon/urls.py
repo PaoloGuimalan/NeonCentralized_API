@@ -25,6 +25,9 @@ urlpatterns = [
         include(
             [
                 path("user/", include("user.urls", namespace="api-user")),
+                path(
+                    "messenger/", include("messenger.urls", namespace="api-messenger")
+                ),
             ]
         ),
     ),
