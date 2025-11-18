@@ -1,5 +1,6 @@
 import random
 import uuid
+import secrets
 from django.core.exceptions import ValidationError
 from django.db import models, IntegrityError
 from django.core.validators import EmailValidator
@@ -83,3 +84,12 @@ class Verification(models.Model):
     )
     date_generated = models.DateTimeField(default=now)
     is_used = models.BooleanField(default=False)
+
+
+class Token(models.Model):
+    id = models.CharField(
+        max_length=150, default=uuid.uuid4, unique=True, primary_key=True
+    )
+    token = models.CharField(default=secrets.token_hex(16), null=False)
+    account = models.ForeignKey(Account, null=False, on_delete=models.DO_NOTHING)
+    date_generated = models.DateTimeField(default=now)

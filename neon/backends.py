@@ -1,5 +1,5 @@
 from django.contrib.auth.backends import BaseBackend
-from user.models import Account
+from user.models import Account, Token
 from .utils.jwt_tools import JWTTools
 
 jwt = JWTTools
@@ -9,17 +9,22 @@ class AutheticationBackend(BaseBackend):
 
     def authenticate(self, request):
         try:
-            token = request.headers.get("x-access-token")
+            auth_token = request.headers.get("x-access-token")
+            token = request.headers.get("x-developer-token")
 
-            if not token:
-                return None
+            if auth_token:
+                decoded_header = jwt.decoder(auth_token)
+                decoded_id = decoded_header["userID"]
 
-            decoded_header = jwt.decoder(token)
-            decoded_id = decoded_header["userID"]
-
-            user = Account.objects.get(username=decoded_id)
-            return (user, True)
+                user = Account.objects.get(username=decoded_id)
+                return (user, True)
+            elif token:
+                loaded_token = Token.objects.get(token=token)
+                user = Account.objects.get(username=loaded_token.account.username)
+                return (user, True)
         except Account.DoesNotExist:
+            return None
+        except Token.DoesNotExist:
             return None
         except:
             return None
