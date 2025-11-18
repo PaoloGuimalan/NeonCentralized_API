@@ -47,6 +47,10 @@ class Message(models.Model):
         default=None,
         blank=True,
     )
-    deleted_at = models.DateTimeField(auto_now=True)
+    deleted_at = models.DateTimeField(
+        null=True,
+        default=None,
+        blank=True,
+    )
     receivers = models.ManyToManyField(Account, related_name="conversation_receivers")
     seeners = models.ManyToManyField(Account, related_name="conversation_seeners")
