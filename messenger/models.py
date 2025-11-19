@@ -60,3 +60,12 @@ class Message(models.Model):
     seeners = models.ManyToManyField(
         Account, related_name="conversation_seeners", blank=True
     )
+
+
+class Summary(models.Model):
+    summary_id = models.UUIDField(
+        default=uuid.uuid4, primary_key=True, null=False, unique=True
+    )
+    conversation = models.ForeignKey(Conversation, on_delete=models.DO_NOTHING)
+    context = models.TextField(null=False)
+    range = models.IntegerField()

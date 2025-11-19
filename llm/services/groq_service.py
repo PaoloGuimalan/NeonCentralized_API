@@ -9,7 +9,7 @@ default_model = os.getenv("GROQ_MODEL")
 
 
 def stream_groq_chat_completion(
-    system_prompt, user_message, tool_response=None, model=default_model
+    history, system_prompt, user_message, tool_response=None, model=default_model
 ):
     """
     Makes a streaming chat completion request to Groq with optional tool response context.
@@ -23,7 +23,8 @@ def stream_groq_chat_completion(
     Yields:
         str: Incremental tokens returned from Groq streaming chat completion.
     """
-    messages = [
+    messages = history
+    messages += [
         {
             "role": "system",
             "content": f"{system_prompt}, these are the tools available for you to use, {json.dumps(tool_response)}",
@@ -90,3 +91,17 @@ def stream_groq_chat_completion(
                 yield delta_followup.content
         else:
             yield delta.content
+
+
+def summarize_messages(messages, model=default_model):
+    summary_response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": f"Summarize these messages and format them for llm to understand for history referencing. Messages: {json.dumps(messages)}",
+            }
+        ],
+    )
+
+    return summary_response.choices[0].message.content
