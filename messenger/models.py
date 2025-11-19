@@ -31,8 +31,10 @@ class Message(models.Model):
     )
     pending_id = models.UUIDField(default=uuid.uuid4, null=False, unique=True)
     conversation = models.ForeignKey(Conversation, on_delete=models.DO_NOTHING)
-    sender = models.ForeignKey(Account, on_delete=models.DO_NOTHING)
-    agent = models.ForeignKey(Agent, on_delete=models.DO_NOTHING)
+    sender = models.ForeignKey(
+        Account, on_delete=models.DO_NOTHING, null=True, blank=True
+    )
+    agent = models.ForeignKey(Agent, on_delete=models.DO_NOTHING, null=True, blank=True)
     message_type = models.CharField(choices=MESSAGE_TYPE_CHOICES, null=False)
     content = models.TextField(null=False)
     created_at = models.DateTimeField(auto_now=True)
@@ -52,5 +54,9 @@ class Message(models.Model):
         default=None,
         blank=True,
     )
-    receivers = models.ManyToManyField(Account, related_name="conversation_receivers")
-    seeners = models.ManyToManyField(Account, related_name="conversation_seeners")
+    receivers = models.ManyToManyField(
+        Account, related_name="conversation_receivers", blank=True
+    )
+    seeners = models.ManyToManyField(
+        Account, related_name="conversation_seeners", blank=True
+    )
