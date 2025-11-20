@@ -103,7 +103,7 @@ def summarize_messages(messages, model=default_model):
         messages=[
             {
                 "role": "system",
-                "content": f"Summarize these messages and format them for llm to understand for history referencing, but it is important to make the summary as SHORT as possible, always. Messages: {json.dumps(messages)}",
+                "content": f"Summarize these messages and format them for llm to understand for history referencing, but it is important to make the summary as SHORT as possible, but not too short, always. Make it details and concise. Messages: {json.dumps(messages)}",
             }
         ],
     )
