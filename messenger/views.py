@@ -11,6 +11,7 @@ from llm.serializers import ToolSerializer
 from django.http import StreamingHttpResponse
 from neon.utils.parsing_tools import stringify_json
 from llm.services.groq_service import stream_groq_chat_completion, summarize_messages
+from llm.utils.llm_response_parsing import handle_llm_response
 
 
 class Pagination(PageNumberPagination):
@@ -156,7 +157,7 @@ class MessagingView(APIView):
                 messages = Message.objects.filter(conversation=conversation)
                 serialized_messages = MessageSerializer(messages, many=True).data
 
-                if messages.count() == batch_size:
+                if messages.count() >= batch_size:
                     for msg in serialized_messages:
                         to_summarize.append(
                             {
@@ -182,7 +183,7 @@ class MessagingView(APIView):
                     raw_summary = summarize_messages(to_summarize)
 
                     Summary.objects.create(
-                        conversation=conversation, context=raw_summary, range=6
+                        conversation=conversation, context=raw_summary, range=batch_size
                     )
 
                 else:
@@ -229,7 +230,7 @@ class MessagingView(APIView):
                         sender=None,
                         agent=agent,
                         message_type="ai_reply",
-                        content=full_reply,
+                        content=handle_llm_response(full_reply),
                     )
 
                     ai_reply.save()

@@ -23,11 +23,15 @@ def stream_groq_chat_completion(
     Yields:
         str: Incremental tokens returned from Groq streaming chat completion.
     """
+    llm_encapsulated_tool_info = [
+            {"name": tool["name"], "description": tool["description"], "parameters": tool["parameters_schema"]} for tool in tool_response
+        ]
+
     messages = history
     messages += [
         {
             "role": "system",
-            "content": f"{system_prompt}, these are the tools available for you to use, {json.dumps(tool_response)}",
+            "content": f"{system_prompt}, these are the tools available for you to use, {json.dumps(llm_encapsulated_tool_info)}",
         },
         {"role": "user", "content": user_message},
     ]
@@ -99,7 +103,7 @@ def summarize_messages(messages, model=default_model):
         messages=[
             {
                 "role": "system",
-                "content": f"Summarize these messages and format them for llm to understand for history referencing. Messages: {json.dumps(messages)}",
+                "content": f"Summarize these messages and format them for llm to understand for history referencing, but it is important to make the summary as SHORT as possible, always. Messages: {json.dumps(messages)}",
             }
         ],
     )
