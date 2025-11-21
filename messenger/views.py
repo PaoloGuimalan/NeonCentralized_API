@@ -200,19 +200,6 @@ class MessagingView(APIView):
                             }
                         )
 
-            new_message = Message(
-                conversation=conversation,
-                sender=user,
-                agent=None,
-                message_type=message_type,
-                content=content,
-            )
-
-            new_message.save()
-
-            new_message.receivers.add(user)
-            new_message.seeners.add(user)
-
             def stream_response():
                 max_retries = 3
                 attempts = 0
@@ -226,6 +213,19 @@ class MessagingView(APIView):
                             if token is not None:
                                 combined.append(token)
                                 yield f'data: {stringify_json({"status": True, "token": token})}\n\n'
+
+                        new_message = Message(
+                            conversation=conversation,
+                            sender=user,
+                            agent=None,
+                            message_type=message_type,
+                            content=content,
+                        )
+
+                        new_message.save()
+
+                        new_message.receivers.add(user)
+                        new_message.seeners.add(user)
 
                         full_reply = "".join(combined)
 
@@ -248,6 +248,19 @@ class MessagingView(APIView):
                         # Provide immediate feedback of failure to client
                         yield f'data: {stringify_json({"status": False, "message": f"Attempt {attempts} failed: {str(ex)}"})}\n\n'
                         if attempts >= max_retries:
+                            new_message = Message(
+                                conversation=conversation,
+                                sender=user,
+                                agent=None,
+                                message_type=message_type,
+                                content=content,
+                            )
+
+                            new_message.save()
+
+                            new_message.receivers.add(user)
+                            new_message.seeners.add(user)
+
                             # Generate a final message using LLM to inform user there's a persistent problem
                             error_message = "Sorry, there is a problem processing your request. Please try again later."
 
