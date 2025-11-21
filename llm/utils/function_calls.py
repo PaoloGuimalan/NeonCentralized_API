@@ -1,12 +1,20 @@
 import requests
 
 
-def api_call(method, url, parameters, headers=None):
+def api_call(method, url, parameters, param_type, headers=None):
     method = method.upper()
     try:
         if method == "GET":
-            # For GET, send parameters as query string
-            response = requests.get(url, params=parameters, headers=headers)
+            if param_type == "query":
+                # For GET, send parameters as query string
+                response = requests.get(url, params=parameters, headers=headers)
+            elif param_type == "route":
+                url = url.format(**parameters)
+                # For GET, send parameters as route string
+                response = requests.get(url, headers=headers)
+            else:
+                # For GET, send parameters as query string
+                response = requests.get(url, params=parameters, headers=headers)
         elif method == "POST":
             # For POST, send parameters as JSON body
             response = requests.post(url, json=parameters, headers=headers)
@@ -28,7 +36,13 @@ def api_call(method, url, parameters, headers=None):
         return {"error": str(e)}
 
 
-def trigger_function(func, method, url, parameters, headers):
+def trigger_function(func, method, url, parameters, param_type, headers):
 
     if func == "api_call":
-        return api_call(method=method, url=url, parameters=parameters, headers=headers)
+        return api_call(
+            method=method,
+            url=url,
+            parameters=parameters,
+            param_type=param_type,
+            headers=headers,
+        )

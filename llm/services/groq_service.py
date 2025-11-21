@@ -24,42 +24,49 @@ def stream_groq_chat_completion(
         str: Incremental tokens returned from Groq streaming chat completion.
     """
     llm_encapsulated_tool_info = [
-            {"name": tool["name"], "description": tool["description"], "parameters": tool["parameters_schema"]} for tool in tool_response
-        ]
+        {
+            "name": tool["name"],
+            "description": tool["description"],
+            "parameters": tool["parameters_schema"],
+        }
+        for tool in tool_response
+    ]
 
     messages = history
     messages += [
         {
             "role": "system",
-            "content": f"{system_prompt}, these are the tools available for you to use, {json.dumps(llm_encapsulated_tool_info)}",
+            "content": f"{system_prompt}, these are the tools available for you to use, {json.dumps(llm_encapsulated_tool_info, indent=2)}. Always check this tools when asked for you capability, no matter what the history in the conversation says.",
         },
         {"role": "user", "content": user_message},
     ]
 
-    if tool_response:
-        messages.append(
-            {
-                "role": "assistant",
-                "content": json.dumps(tool_response),
-            }
-        )
+    # if tool_response:
+    #     messages.append(
+    #         {
+    #             "role": "assistant",
+    #             "content": json.dumps(llm_encapsulated_tool_info),
+    #         }
+    #     )
 
     # Call Groq chat completions with streaming enabled
     completion = client.chat.completions.create(
         model=model,
         messages=messages,
         stream=True,
-        functions=[
-            {**tool, "parameters": tool["parameters_schema"]} for tool in tool_response
-        ],
+        functions=llm_encapsulated_tool_info,
         function_call="auto",
         # tools=[{"type": "function", "function": func} for func in tool_response],
         # tool_choice="auto",
     )
 
+    # print(messages)
+
     # Yield incremental tokens as they arrive
     for chunk in completion:
         delta = chunk.choices[0].delta
+
+        # print(chunk)
 
         if delta.function_call:
             name = delta.function_call.name
@@ -72,6 +79,7 @@ def stream_groq_chat_completion(
                 current_tool["http_method"],
                 current_tool["api_endpoint"],
                 json.loads(arguments),
+                current_tool["param_type"],
                 current_tool["headers_schema"],
             )
 
@@ -103,7 +111,7 @@ def summarize_messages(messages, model=default_model):
         messages=[
             {
                 "role": "system",
-                "content": f"Summarize these messages and format them for llm to understand for history referencing, but it is important to make the summary as SHORT as possible, but not too short, always. Make it details and concise. Messages: {json.dumps(messages)}",
+                "content": f"Summarize these messages and format them for llm to understand for history referencing, but it is important to make the summary as SHORT as possible, but not too short, always. Make it details and concise and never forget to include important informations from the conversation. Messages: {json.dumps(messages)}",
             }
         ],
     )

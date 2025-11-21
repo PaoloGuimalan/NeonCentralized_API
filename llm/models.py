@@ -9,6 +9,12 @@ class Tool(models.Model):
     Represents a callable function/tool agents can use.
     """
 
+    PARAM_TYPE_CHOICES = [
+        ("query", "Query"),
+        ("route", "Route"),
+        ("body", "Body"),
+    ]
+
     name = models.CharField(max_length=100, unique=True)
     description = models.TextField(blank=True)
     parameters_schema = models.JSONField(
@@ -23,7 +29,11 @@ class Tool(models.Model):
     http_method = models.CharField(
         max_length=10, choices=[("GET", "GET"), ("POST", "POST")], default="POST"
     )
+    param_type = models.CharField(
+        choices=PARAM_TYPE_CHOICES, null=False, default="query"
+    )
     requires_auth = models.BooleanField(default=False)
+    is_enabled = models.BooleanField(default=False)
     authentication = models.TextField(blank=True)
 
     def __str__(self):

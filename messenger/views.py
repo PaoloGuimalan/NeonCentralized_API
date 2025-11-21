@@ -77,7 +77,8 @@ class MessagingView(APIView):
 
             conversation = Conversation.objects.get(conversation_id=conversation_id)
             agent = Agent.objects.get(uuid=agent_uuid)
-            tools = ToolSerializer(agent.role.tools, many=True).data
+            enabled_tools_qs = agent.role.tools.filter(is_enabled=True)
+            tools = ToolSerializer(enabled_tools_qs, many=True).data
 
             history = []
 
@@ -212,35 +213,57 @@ class MessagingView(APIView):
             new_message.receivers.add(user)
             new_message.seeners.add(user)
 
-            combined = []
-
             def stream_response():
-                try:
-                    for token in stream_groq_chat_completion(
-                        history, agent.role.system_prompt, content, tools
-                    ):
-                        if token is not None:
-                            combined.append(token)
-                            yield f'data: {stringify_json({"status": True, "token": token})}\n\n'
+                max_retries = 3
+                attempts = 0
 
-                    full_reply = "".join(combined)
+                while attempts < max_retries:
+                    try:
+                        combined = []
+                        for token in stream_groq_chat_completion(
+                            history, agent.role.system_prompt, content, tools
+                        ):
+                            if token is not None:
+                                combined.append(token)
+                                yield f'data: {stringify_json({"status": True, "token": token})}\n\n'
 
-                    ai_reply = Message(
-                        conversation=conversation,
-                        sender=None,
-                        agent=agent,
-                        message_type="ai_reply",
-                        content=handle_llm_response(full_reply),
-                    )
+                        full_reply = "".join(combined)
 
-                    ai_reply.save()
+                        ai_reply = Message(
+                            conversation=conversation,
+                            sender=None,
+                            agent=agent,
+                            message_type="ai_reply",
+                            content=handle_llm_response(full_reply),
+                        )
+                        ai_reply.save()
+                        ai_reply.receivers.add(user)
+                        ai_reply.seeners.add(user)
 
-                    ai_reply.receivers.add(user)
-                    ai_reply.seeners.add(user)
+                        # Exit if successful
+                        return
 
-                except Exception as ex:
-                    yield f'data: {stringify_json({"status": False, "message": f"Unexpected error: {str(ex)}"})}\n\n'
-                    return
+                    except Exception as ex:
+                        attempts += 1
+                        # Provide immediate feedback of failure to client
+                        yield f'data: {stringify_json({"status": False, "message": f"Attempt {attempts} failed: {str(ex)}"})}\n\n'
+                        if attempts >= max_retries:
+                            # Generate a final message using LLM to inform user there's a persistent problem
+                            error_message = "Sorry, there is a problem processing your request. Please try again later."
+
+                            ai_reply = Message(
+                                conversation=conversation,
+                                sender=None,
+                                agent=agent,
+                                message_type="ai_reply",
+                                content=error_message,
+                            )
+                            ai_reply.save()
+                            ai_reply.receivers.add(user)
+                            ai_reply.seeners.add(user)
+
+                            yield f'data: {stringify_json({"status": False, "token": error_message})}\n\n'
+                            return
 
             return StreamingHttpResponse(
                 stream_response(),
