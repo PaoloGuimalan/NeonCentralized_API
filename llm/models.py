@@ -84,3 +84,22 @@ class Agent(models.Model):
     def __str__(self):
         role_name = self.role.name if self.role else "No Role"
         return f"{self.name} ({self.organization.name}, Role: {role_name})"
+
+
+class Service(models.Model):
+
+    uuid = models.CharField(default=uuid.uuid4, null=False, unique=True)
+    name = models.CharField(max_length=255)
+
+
+class Model(models.Model):
+
+    uuid = models.CharField(default=uuid.uuid4, null=False, unique=True)
+    service = models.ForeignKey(
+        Service,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="llm_service",
+    )
+    model = models.CharField(max_length=255)

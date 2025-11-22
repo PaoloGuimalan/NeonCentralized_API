@@ -16,7 +16,7 @@ class GroqService:
             self.client = Groq(api_key=api_key)
             self.model = model
 
-    def stream_groq_chat_completion(
+    def stream_chat_completion(
         self, history, system_prompt, user_message, tool_response=None
     ):
         """
