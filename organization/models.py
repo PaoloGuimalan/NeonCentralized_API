@@ -16,6 +16,7 @@ class Organization(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     access_key = models.CharField(max_length=150, default=uuid.uuid4, unique=True)
     pin = models.CharField(max_length=255, default=uuid.uuid4, unique=True)
+    llm_api_key = models.TextField(blank=True, default=None, null=True)
     address = models.CharField(max_length=255, blank=True)
     contact_email = models.EmailField(blank=True)
     phone_number = models.CharField(max_length=20, blank=True)

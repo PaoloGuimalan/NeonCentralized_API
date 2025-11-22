@@ -10,7 +10,7 @@ from llm.models import Agent
 from llm.serializers import ToolSerializer
 from django.http import StreamingHttpResponse
 from neon.utils.parsing_tools import stringify_json
-from llm.services.groq_service import stream_groq_chat_completion, summarize_messages
+from llm.services.groq_service import GroqService
 from llm.utils.llm_response_parsing import handle_llm_response
 
 
@@ -80,6 +80,10 @@ class MessagingView(APIView):
             enabled_tools_qs = agent.role.tools.filter(is_enabled=True)
             tools = ToolSerializer(enabled_tools_qs, many=True).data
 
+            groq_service = GroqService(
+                conversation.organization.llm_api_key, "llama-3.3-70b-versatile"
+            )
+
             history = []
 
             batch_size = 20
@@ -128,7 +132,7 @@ class MessagingView(APIView):
                             )
                         to_summarize.extend(batch_messages)
 
-                        cumulative_summary = summarize_messages(
+                        cumulative_summary = groq_service.summarize_messages(
                             to_summarize
                         )  # your LLM summarizer
 
@@ -181,7 +185,7 @@ class MessagingView(APIView):
                             }
                         )
 
-                    raw_summary = summarize_messages(to_summarize)
+                    raw_summary = groq_service.summarize_messages(to_summarize)
 
                     Summary.objects.create(
                         conversation=conversation, context=raw_summary, range=batch_size
@@ -207,7 +211,7 @@ class MessagingView(APIView):
                 while attempts < max_retries:
                     try:
                         combined = []
-                        for token in stream_groq_chat_completion(
+                        for token in groq_service.stream_groq_chat_completion(
                             history, agent.role.system_prompt, content, tools
                         ):
                             if token is not None:
