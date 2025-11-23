@@ -44,7 +44,7 @@ class GroqService:
         messages += [
             {
                 "role": "system",
-                "content": f"{system_prompt}, these are the tools available for you to use, {json.dumps(llm_encapsulated_tool_info, indent=2)}. Always check this tools when asked for you capability, no matter what the history in the conversation says.",
+                "content": f"{system_prompt}, these are the tools available for you to use, {json.dumps(llm_encapsulated_tool_info, indent=2)}. Always check this tools when asked for you capability no matter what the history in the conversation says.",
             },
             {"role": "user", "content": user_message},
         ]
