@@ -7,9 +7,11 @@ from rest_framework.pagination import PageNumberPagination
 from messenger.models import Conversation, Message, Summary
 from messenger.serializers import ConversationSerializer, MessageSerializer
 from llm.models import Agent, Model
+from organization.models import Member
 from llm.serializers import ToolSerializer
 from django.http import StreamingHttpResponse
 from neon.utils.parsing_tools import stringify_json
+import uuid
 
 # from llm.services.groq_service import GroqService
 from llm.services.llm_factory import LLMFactory
@@ -298,3 +300,23 @@ class MessagingView(APIView):
 
         except Exception as ex:
             return Response(ex, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+class ConversationView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        try:
+            user = self.request.user
+            name = request.data.get("name")
+
+            member = Member.objects.get(account=user)
+
+            query_set = Conversation.objects.create(
+                organization=member.organization,
+                name=name,
+                created_by=member.account
+            )
+
+            return Response({ "conversation_id": query_set.conversation_id }, status=status.HTTP_200_OK)
+        except Exception as ex:
+            return Response(str(ex), status=status.HTTP_500_INTERNAL_SERVER_ERROR)

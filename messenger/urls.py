@@ -20,4 +20,9 @@ urlpatterns = [
         views.MessagingListView.as_view(),
         name="messenger-list",
     ),
+    path(
+        "conversation",
+        views.ConversationView.as_view(),
+        name="messenger-conversation",
+    ),
 ]
