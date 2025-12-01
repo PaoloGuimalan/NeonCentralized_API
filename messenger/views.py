@@ -312,13 +312,24 @@ class ConversationView(APIView):
 
             member = Member.objects.get(account=user)
 
-            query_set = Conversation.objects.create(
-                organization=member.organization,
-                name=name,
-                footprint=footprint,
-                created_by=member.account
-            )
+            if footprint is not None:
+                # Only dedupe when footprint has a value
+                conversation, created = Conversation.objects.get_or_create(
+                    footprint=footprint,
+                    defaults={
+                        "organization": member.organization,
+                        "name": name,
+                        "created_by": member.account,
+                    },
+                )
+            else:
+                conversation = Conversation.objects.create(
+                    organization=member.organization,
+                    name=name,
+                    footprint=footprint,
+                    created_by=member.account
+                )
 
-            return Response({ "conversation_id": query_set.conversation_id }, status=status.HTTP_200_OK)
+            return Response({ "conversation_id": conversation.conversation_id }, status=status.HTTP_200_OK)
         except Exception as ex:
             return Response(str(ex), status=status.HTTP_500_INTERNAL_SERVER_ERROR)
