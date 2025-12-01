@@ -308,12 +308,14 @@ class ConversationView(APIView):
         try:
             user = self.request.user
             name = request.data.get("name")
+            footprint = request.data.get("footprint", None)
 
             member = Member.objects.get(account=user)
 
             query_set = Conversation.objects.create(
                 organization=member.organization,
                 name=name,
+                footprint=footprint,
                 created_by=member.account
             )
 
