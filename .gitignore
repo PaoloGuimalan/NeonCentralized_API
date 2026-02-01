@@ -8,6 +8,7 @@ db.sqlite3
 
 # Virtual Environment
 .env
+production.env
 venv/
 env/
 

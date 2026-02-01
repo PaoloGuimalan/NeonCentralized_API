@@ -41,6 +41,8 @@ MONGODB_DB = os.getenv("MONGODB_DB")
 
 MAILINGSERVICE = os.getenv("MAILINGSERVICE")
 
+CSRF_TRUSTED_ORIGINS = ["https://*.chatterloop.app", "https://*.neonsystems.net"]
+
 CACHES = {
     "default": {
         "BACKEND": "django_redis.cache.RedisCache",
