@@ -16,6 +16,10 @@ import uuid
 # from llm.services.groq_service import GroqService
 from llm.services.llm_factory import LLMFactory
 from llm.utils.llm_response_parsing import handle_llm_response
+from llm.services.rag import CustomerServiceRAG
+from llm.scripts.tasks import index_chat_message_task
+
+rag = CustomerServiceRAG()
 
 
 class Pagination(PageNumberPagination):
@@ -92,125 +96,18 @@ class MessagingView(APIView):
                 model=llm_model.model,
             )
 
+            history_query = rag.retrieve(content, conversation.conversation_id, 5)
             history = []
 
-            batch_size = 20
+            print(history_query)
 
-            try:
-                messages = Message.objects.filter(conversation=conversation).order_by(
-                    "created_at"
-                )
-                serialized_messages = MessageSerializer(messages, many=True).data
-
-                # Prepare messages for summarization
-                def build_messages_for_batch(batch):
-                    return [
-                        {
-                            "role": (
-                                "user" if msg["message_type"] == "text" else "assistant"
-                            ),
-                            "content": f"History: {msg['content']}",
-                        }
-                        for msg in batch
-                    ]
-
-                # Get existing summary range if any
-                summary = Summary.objects.get(conversation=conversation)
-                last_range = summary.range
-
-                total_messages = len(serialized_messages)
-
-                # Only summarize if total messages >= last range + batch_size
-                if total_messages - last_range >= batch_size or last_range == 0:
-                    batches = [
-                        serialized_messages[i : i + batch_size]
-                        for i in range(0, total_messages, batch_size)
-                    ]
-
-                    cumulative_summary = ""
-                    for batch in batches:
-                        batch_messages = build_messages_for_batch(batch)
-                        to_summarize = []
-                        if cumulative_summary:
-                            to_summarize.append(
-                                {
-                                    "role": "system",
-                                    "content": f"Previous summary: {cumulative_summary}",
-                                }
-                            )
-                        to_summarize.extend(batch_messages)
-
-                        cumulative_summary = llm_service.summarize_messages(
-                            to_summarize
-                        )  # your LLM summarizer
-
-                    # Update summary and range
-                    Summary.objects.update_or_create(
-                        conversation=conversation,
-                        defaults={
-                            "context": cumulative_summary,
-                            "range": total_messages,
-                        },
-                    )
-
-                # Build final history with summary and leftover
-                history = [
+            for msg in history_query:
+                history.append(
                     {
-                        "role": "system",
-                        "content": f"Summary so far: {summary.context if summary else ''}",
+                        "role": ("user" if msg["type"] == "text" else "assistant"),
+                        "content": f'History: {msg["text"]}',
                     }
-                ]
-
-                leftover_start = last_range if last_range else 0
-                leftover_messages = serialized_messages[leftover_start:]
-                history.extend(build_messages_for_batch(leftover_messages))
-
-            except Summary.DoesNotExist:
-                to_summarize = []
-                messages = Message.objects.filter(conversation=conversation)
-                serialized_messages = MessageSerializer(messages, many=True).data
-
-                if messages.count() >= batch_size:
-                    for msg in serialized_messages:
-                        to_summarize.append(
-                            {
-                                "role": (
-                                    "user"
-                                    if msg["message_type"] == "text"
-                                    else "assistant"
-                                ),
-                                "content": f'History: {msg["content"]}',
-                            }
-                        )
-                        history.append(
-                            {
-                                "role": (
-                                    "user"
-                                    if msg["message_type"] == "text"
-                                    else "assistant"
-                                ),
-                                "content": f'History: {msg["content"]}',
-                            }
-                        )
-
-                    raw_summary = llm_service.summarize_messages(to_summarize)
-
-                    Summary.objects.create(
-                        conversation=conversation, context=raw_summary, range=batch_size
-                    )
-
-                else:
-                    for msg in serialized_messages:
-                        history.append(
-                            {
-                                "role": (
-                                    "user"
-                                    if msg["message_type"] == "text"
-                                    else "assistant"
-                                ),
-                                "content": f'History: {msg["content"]}',
-                            }
-                        )
+                )
 
             def stream_response():
                 max_retries = 3
@@ -236,6 +133,8 @@ class MessagingView(APIView):
 
                         new_message.save()
 
+                        index_chat_message_task.delay(new_message.message_id)
+
                         new_message.receivers.add(user)
                         new_message.seeners.add(user)
 
@@ -249,6 +148,9 @@ class MessagingView(APIView):
                             content=handle_llm_response(full_reply),
                         )
                         ai_reply.save()
+
+                        index_chat_message_task.delay(ai_reply.message_id)
+
                         ai_reply.receivers.add(user)
                         ai_reply.seeners.add(user)
 
@@ -270,6 +172,8 @@ class MessagingView(APIView):
 
                             new_message.save()
 
+                            index_chat_message_task.delay(new_message.message_id)
+
                             new_message.receivers.add(user)
                             new_message.seeners.add(user)
 
@@ -284,6 +188,9 @@ class MessagingView(APIView):
                                 content=error_message,
                             )
                             ai_reply.save()
+
+                            index_chat_message_task.delay(ai_reply.message_id)
+
                             ai_reply.receivers.add(user)
                             ai_reply.seeners.add(user)
 
@@ -299,8 +206,9 @@ class MessagingView(APIView):
             )
 
         except Exception as ex:
-            return Response(ex, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
+            return Response(str(ex), status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 class ConversationView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -327,9 +235,12 @@ class ConversationView(APIView):
                     organization=member.organization,
                     name=name,
                     footprint=footprint,
-                    created_by=member.account
+                    created_by=member.account,
                 )
 
-            return Response({ "conversation_id": conversation.conversation_id }, status=status.HTTP_200_OK)
+            return Response(
+                {"conversation_id": conversation.conversation_id},
+                status=status.HTTP_200_OK,
+            )
         except Exception as ex:
             return Response(str(ex), status=status.HTTP_500_INTERNAL_SERVER_ERROR)

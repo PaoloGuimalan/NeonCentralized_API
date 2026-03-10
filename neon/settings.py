@@ -70,6 +70,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "rest_framework",
     "corsheaders",
+    "celery",
     # Added apps
     "user",
     "organization",
@@ -89,6 +90,22 @@ MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
 ]
+
+RAG = {
+    "PINECONE_API_KEY": os.getenv("PINECONE_API_KEY"),
+    "PINECONE_INDEX": os.getenv("PINECONE_INDEX"),
+    "EMBEDDING_MODEL": os.getenv("EMBEDDING_MODEL"),
+    "DIMENSION": os.getenv("DIMENSION"),
+    "CHUNK_SIZE": os.getenv("CHUNK_SIZE"),
+}
+
+# Celery (you already have Redis)
+CELERY_BROKER_URL = (
+    f"redis://{REDIS_USERNAME}:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/0"
+)
+CELERY_RESULT_BACKEND = (
+    f"redis://{REDIS_USERNAME}:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/0"
+)
 
 CORS_ALLOWED_ORIGINS = []
 
