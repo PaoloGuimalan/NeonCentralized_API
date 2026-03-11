@@ -4,7 +4,7 @@ from ..services.rag import CustomerServiceRAG
 
 
 @shared_task
-def index_chat_message_task(message_id):
+def index_chat_message_task(message_id, open_ai_api_key):
     print("Init Delay Index")
     message = Message.objects.get(message_id=message_id)
     rag = CustomerServiceRAG()
@@ -16,4 +16,5 @@ def index_chat_message_task(message_id):
         message.conversation.conversation_id,
         message.message_type,
         message.content,
+        open_ai_api_key,
     )

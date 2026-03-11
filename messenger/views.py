@@ -96,15 +96,18 @@ class MessagingView(APIView):
                 model=llm_model.model,
             )
 
-            history_query = rag.retrieve(content, conversation.conversation_id, 5)
+            history_query = rag.retrieve(
+                content,
+                conversation.conversation_id,
+                conversation.organization.llm_api_key,
+                5,
+            )
             history = []
-
-            print(history_query)
 
             for msg in history_query:
                 history.append(
                     {
-                        "role": ("user" if msg["type"] == "text" else "assistant"),
+                        "role": ("user" if msg["msg_type"] == "text" else "assistant"),
                         "content": f'History: {msg["text"]}',
                     }
                 )
@@ -133,7 +136,10 @@ class MessagingView(APIView):
 
                         new_message.save()
 
-                        index_chat_message_task.delay(new_message.message_id)
+                        index_chat_message_task.delay(
+                            new_message.message_id,
+                            conversation.organization.llm_api_key,
+                        )
 
                         new_message.receivers.add(user)
                         new_message.seeners.add(user)
@@ -149,7 +155,9 @@ class MessagingView(APIView):
                         )
                         ai_reply.save()
 
-                        index_chat_message_task.delay(ai_reply.message_id)
+                        index_chat_message_task.delay(
+                            ai_reply.message_id, conversation.organization.llm_api_key
+                        )
 
                         ai_reply.receivers.add(user)
                         ai_reply.seeners.add(user)
@@ -172,7 +180,10 @@ class MessagingView(APIView):
 
                             new_message.save()
 
-                            index_chat_message_task.delay(new_message.message_id)
+                            index_chat_message_task.delay(
+                                new_message.message_id,
+                                conversation.organization.llm_api_key,
+                            )
 
                             new_message.receivers.add(user)
                             new_message.seeners.add(user)
@@ -189,7 +200,10 @@ class MessagingView(APIView):
                             )
                             ai_reply.save()
 
-                            index_chat_message_task.delay(ai_reply.message_id)
+                            index_chat_message_task.delay(
+                                ai_reply.message_id,
+                                conversation.organization.llm_api_key,
+                            )
 
                             ai_reply.receivers.add(user)
                             ai_reply.seeners.add(user)
