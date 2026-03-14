@@ -5,6 +5,7 @@ import pinecone
 from pinecone import ServerlessSpec
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from neon import settings
+from messenger.models import Message
 import time
 
 
@@ -113,6 +114,15 @@ class CustomerServiceRAG:
         for i in range(0, len(all_vectors), 100):
             index.upsert(vectors=all_vectors[i : i + 100])
 
+    def get_history(self, conversationID, limit):
+        query_set = Message.objects.filter(conversation_id=conversationID).order_by(
+            "-created_at"
+        )[:limit]
+
+        return [
+            {"msg_type": msg.message_type, "text": msg.content} for msg in query_set
+        ]
+
     def retrieve(self, query, conversationID, user_openai_key, top_k=5):
         """Retrieves context using user's key for the query embedding"""
         query_vec = self.get_embedding(query, user_openai_key)
@@ -120,9 +130,15 @@ class CustomerServiceRAG:
 
         filters = {"$or": [{"type": "doc"}, {"conversation_id": str(conversationID)}]}
 
+        history = self.get_history(conversationID, 4)
+
         results = index.query(
             vector=query_vec, top_k=30, filter=filters, include_metadata=True
         )
+
+        if not results["matches"]:
+            return history
+
         reranked = self.pc.inference.rerank(
             model=settings.RAG["RERANKER_MODEL"],
             query=query,
@@ -130,6 +146,6 @@ class CustomerServiceRAG:
             top_n=top_k,
         )
 
-        documents = [item.document for item in reranked.data]
+        documents = history + [item.document for item in reranked.data]
 
         return documents
