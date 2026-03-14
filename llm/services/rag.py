@@ -121,6 +121,15 @@ class CustomerServiceRAG:
         filters = {"$or": [{"type": "doc"}, {"conversation_id": str(conversationID)}]}
 
         results = index.query(
-            vector=query_vec, top_k=top_k, filter=filters, include_metadata=True
+            vector=query_vec, top_k=30, filter=filters, include_metadata=True
         )
-        return [match["metadata"] for match in results["matches"]]
+        reranked = self.pc.inference.rerank(
+            model=settings.RAG["RERANKER_MODEL"],
+            query=query,
+            documents=[match["metadata"] for match in results["matches"]],
+            top_n=top_k,
+        )
+
+        documents = [item.document for item in reranked.data]
+
+        return documents

@@ -97,6 +97,7 @@ RAG = {
     "EMBEDDING_MODEL": os.getenv("EMBEDDING_MODEL"),
     "DIMENSION": os.getenv("DIMENSION"),
     "CHUNK_SIZE": os.getenv("CHUNK_SIZE"),
+    "RERANKER_MODEL": os.getenv("RERANKER_MODEL"),
 }
 
 # Celery (you already have Redis)

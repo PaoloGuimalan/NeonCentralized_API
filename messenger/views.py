@@ -100,7 +100,7 @@ class MessagingView(APIView):
                 content,
                 conversation.conversation_id,
                 conversation.organization.llm_api_key,
-                5,
+                10,
             )
             history = []
 
