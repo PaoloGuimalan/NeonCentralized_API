@@ -17,5 +17,8 @@ class ConversationSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
     def get_latest_message(self, obj):
-        latest = obj.latest_message_list[0] if obj.latest_message_list else None
-        return MessageSerializer(latest).data if latest else None
+        if self.context.get("include_latest_message", False):
+            latest = obj.latest_message_list[0] if obj.latest_message_list else None
+            return MessageSerializer(latest).data if latest else None
+
+        return None

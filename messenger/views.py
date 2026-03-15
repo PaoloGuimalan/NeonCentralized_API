@@ -12,6 +12,7 @@ from llm.serializers import ToolSerializer
 from django.http import StreamingHttpResponse
 from neon.utils.parsing_tools import stringify_json
 from django.db.models import Prefetch, Subquery, OuterRef
+from django.shortcuts import get_object_or_404
 import uuid
 
 # from llm.services.groq_service import GroqService
@@ -62,7 +63,9 @@ class MessagingListView(APIView):
                 query_set, request, view=self
             )
 
-            serialized_result = ConversationSerializer(paginated_queryset, many=True)
+            serialized_result = ConversationSerializer(
+                paginated_queryset, many=True, context={"include_latest_message": True}
+            )
             data = paginator.get_paginated_response(serialized_result.data)
 
             return data
@@ -243,6 +246,22 @@ class MessagingView(APIView):
 
 class ConversationView(APIView):
     permission_classes = [IsAuthenticated]
+
+    def get(self, request, conversation_id):
+        try:
+            user = self.request.user
+            queryset = get_object_or_404(Conversation, conversation_id=conversation_id)
+
+            serialized_conv = ConversationSerializer(
+                queryset, context={"include_latest_message": False}
+            )
+
+            return Response(
+                serialized_conv.data,
+                status=status.HTTP_200_OK,
+            )
+        except Exception as ex:
+            return Response(str(ex), status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def post(self, request):
         try:

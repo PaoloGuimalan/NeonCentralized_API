@@ -25,4 +25,9 @@ urlpatterns = [
         views.ConversationView.as_view(),
         name="messenger-conversation",
     ),
+    path(
+        "conversation/<str:conversation_id>/",
+        views.ConversationView.as_view(),
+        name="messenger-conversation",
+    ),
 ]
