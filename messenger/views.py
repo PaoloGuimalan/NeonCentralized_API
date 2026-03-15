@@ -104,6 +104,7 @@ class MessagingView(APIView):
             content = request.data.get("content")
             agent_uuid = request.data.get("agent_uuid")
             model_uuid = request.data.get("model_uuid")
+            pending_id = request.data.get("pending_id")
 
             conversation = Conversation.objects.get(conversation_id=conversation_id)
             agent = Agent.objects.get(uuid=agent_uuid)
@@ -153,6 +154,7 @@ class MessagingView(APIView):
                             agent=None,
                             message_type=message_type,
                             content=content,
+                            pending_id=pending_id,
                         )
 
                         new_message.save()
@@ -197,6 +199,7 @@ class MessagingView(APIView):
                                 agent=None,
                                 message_type=message_type,
                                 content=content,
+                                pending_id=pending_id,
                             )
 
                             new_message.save()
