@@ -11,6 +11,7 @@ from organization.models import Member
 from llm.serializers import ToolSerializer
 from django.http import StreamingHttpResponse
 from neon.utils.parsing_tools import stringify_json
+from django.db.models import Prefetch, Subquery, OuterRef
 import uuid
 
 # from llm.services.groq_service import GroqService
@@ -35,8 +36,25 @@ class MessagingListView(APIView):
         try:
             user = self.request.user
 
-            query_set = Conversation.objects.filter(created_by=user).order_by(
-                "-created_at"
+            latest_time_qs = (
+                Message.objects.filter(conversation=OuterRef("pk"))
+                .order_by("-created_at")
+                .values("created_at")[:1]
+            )
+
+            query_set = (
+                Conversation.objects.annotate(
+                    latest_message_time=Subquery(latest_time_qs)
+                )
+                .prefetch_related(
+                    Prefetch(
+                        "message_set",
+                        queryset=Message.objects.order_by("-created_at")[:1],
+                        to_attr="latest_message_list",
+                    )
+                )
+                .filter(created_by=user)
+                .order_by("latest_message_time", "-created_at")
             )
 
             paginator = self.pagination_class()
