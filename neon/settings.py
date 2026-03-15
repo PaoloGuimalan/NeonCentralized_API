@@ -76,6 +76,7 @@ INSTALLED_APPS = [
     "organization",
     "llm",
     "messenger",
+    "core",
 ]
 
 MIDDLEWARE = [

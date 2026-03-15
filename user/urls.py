@@ -20,4 +20,9 @@ urlpatterns = [
         views.UserAuthentication.as_view(),
         name="user-authentication",
     ),
+    path(
+        "tp_auth",
+        views.ThirdPartyAuthentication.as_view(),
+        name="user-tp-authentication",
+    ),
 ]

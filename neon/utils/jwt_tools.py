@@ -11,8 +11,10 @@ JWT_TOKEN = os.getenv("JWT_TOKEN")
 
 class JWTTools:
 
-    def decoder(token):
-        decode_value = jwt.decode(token, JWT_TOKEN, algorithms=ALGORITHMS)
+    def decoder(token, options=None):
+        decode_value = jwt.decode(
+            token, JWT_TOKEN, algorithms=ALGORITHMS, options=options
+        )
         return decode_value
 
     def encoder(value):
