@@ -14,13 +14,10 @@ class Conversation(models.Model):
         Organization, null=False, on_delete=models.DO_NOTHING
     )
     name = models.TextField(default=None)
-    footprint = models.CharField(
-        null=True,
-        blank=True,
-        unique=True,
-        default=None
+    footprint = models.CharField(null=True, blank=True, unique=True, default=None)
+    created_by = models.ForeignKey(
+        Account, null=True, blank=True, on_delete=models.DO_NOTHING
     )
-    created_by = models.ForeignKey(Account, null=False, on_delete=models.DO_NOTHING)
     created_at = models.DateTimeField(auto_now_add=True)
 
 
