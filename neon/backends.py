@@ -17,16 +17,19 @@ class AutheticationBackend(BaseBackend):
                 decoded_id = decoded_header["userID"]
 
                 user = Account.objects.get(username=decoded_id)
-                return (user, True)
+                return (user, "jwt")
             elif token:
                 loaded_token = Token.objects.get(token=token)
                 user = Account.objects.get(username=loaded_token.account.username)
-                return (user, True)
+                # request.auth is the Token instance itself, so views can
+                # identify exactly which integration authenticated the
+                # request (see neon.permissions.IsDeveloperToken).
+                return (user, loaded_token)
         except Account.DoesNotExist:
             return None
         except Token.DoesNotExist:
             return None
-        except:
+        except Exception:
             return None
 
     def get_user(self, user_id):

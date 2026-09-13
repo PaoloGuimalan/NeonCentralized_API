@@ -11,6 +11,11 @@ app_name = "messenger"
 urlpatterns = [
     re_path("", include((router.urls, "messenger-routes"))),
     path(
+        "external/chat",
+        views.ExternalChatView.as_view(),
+        name="messenger-external-chat",
+    ),
+    path(
         "<str:conversation_id>/",
         views.MessagingView.as_view(),
         name="messenger-conversation",

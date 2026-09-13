@@ -1,1 +1,29 @@
-# Add references to files and directories that should be ignored by Docker here.
+# What must never reach the image.
+#
+# The build context is this directory, so `COPY . .` takes everything not
+# listed here. Credentials are supplied at RUNTIME - the Swarm stack mounts a
+# secret at /app/.env - so no env file has any business being baked in. An
+# image carrying credentials hands them to everyone who can pull it, which is
+# a far wider audience than everyone who can read the database, and no amount
+# of mounting a secret over the top removes the copy in the layer beneath.
+.env
+*.env
+production.env
+
+# The full history, for no benefit at runtime.
+.git
+.gitignore
+
+# Local tooling. The image builds its own interpreter and wheels.
+.claude
+.venv
+venv/
+env/
+
+# Build noise.
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+db.sqlite3

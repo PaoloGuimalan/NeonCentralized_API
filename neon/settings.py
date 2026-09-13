@@ -26,7 +26,53 @@ DB_PORT = os.getenv("DB_PORT")
 DB_USERNAME = os.getenv("DB_USERNAME")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 
-DEBUG = os.getenv("DEBUG")
+# Chatterloop's own Postgres. Neon reads identity from it (who somebody is,
+# which pages they may act as) and writes bot/token rows into it. It is never
+# migrated by Neon - see chatterloop/routers.py.
+CHATTERLOOP_DB_HOST = os.getenv("CHATTERLOOP_DB_HOST")
+CHATTERLOOP_DB_NAME = os.getenv("CHATTERLOOP_DB_NAME")
+CHATTERLOOP_DB_PORT = os.getenv("CHATTERLOOP_DB_PORT", "5432")
+CHATTERLOOP_DB_USERNAME = os.getenv("CHATTERLOOP_DB_USERNAME")
+CHATTERLOOP_DB_PASSWORD = os.getenv("CHATTERLOOP_DB_PASSWORD")
+
+# Where Neon forwards sign-in. No trailing slash.
+CHATTERLOOP_API_BASE_URL = os.getenv(
+    "CHATTERLOOP_API_BASE_URL", "https://api.chatterloop.app"
+).rstrip("/")
+
+# developer_service - the API Neon's BOTS authenticate against, with the clt_
+# tokens minted in chatterloop/provisioning.py. A DIFFERENT service from
+# CHATTERLOOP_API_BASE_URL above, which is user_service and handles sign-in.
+# Empty until set: minting a bot works without it, and only /v1/whoami
+# verification needs it, so an unset value fails one feature rather than
+# blocking startup.
+DEVELOPER_SERVICE_BASE_URL = os.getenv("DEVELOPER_SERVICE_BASE_URL", "").rstrip("/")
+
+# Stamped onto the sign-in requests Neon makes on a user's behalf, so the
+# device session chatterloop creates is recognisable in their own device list
+# rather than appearing as an unexplained login.
+CHATTERLOOP_USER_AGENT = os.getenv("CHATTERLOOP_USER_AGENT", "Neon Platform")
+
+CHATTERLOOP_HTTP_TIMEOUT = float(os.getenv("CHATTERLOOP_HTTP_TIMEOUT", "15"))
+
+# Encrypts credentials Neon must be able to read back - provider API keys, and
+# later the chatterloop token secret. Deliberately NOT SECRET_KEY: rotating
+# Django's secret should not make every stored credential unreadable.
+# Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+TOKEN_ENCRYPTION_KEY = os.getenv("TOKEN_ENCRYPTION_KEY")
+
+# Previous keys, newest first, so a rotation is not a flag day. See
+# neon/utils/crypto.py.
+TOKEN_ENCRYPTION_KEY_FALLBACKS = [
+    k for k in os.getenv("TOKEN_ENCRYPTION_KEY_FALLBACKS", "").split(",") if k.strip()
+]
+
+# Which organization existing Tool/Role rows belong to, for the migration that
+# makes them organization-scoped. Only consulted when more than one
+# organization exists - with exactly one, that one is unambiguous.
+NEON_DEFAULT_ORGANIZATION_ID = os.getenv("NEON_DEFAULT_ORGANIZATION_ID")
+
+DEBUG = os.getenv("DEBUG", "False").strip().lower() == "true"
 SECRET_KEY = os.getenv("SECRET_KEY")
 
 REDIS_HOST = os.getenv("REDIS_HOST")
@@ -77,6 +123,7 @@ INSTALLED_APPS = [
     "llm",
     "messenger",
     "core",
+    "chatterloop",
 ]
 
 MIDDLEWARE = [
@@ -99,28 +146,62 @@ RAG = {
     "DIMENSION": os.getenv("DIMENSION"),
     "CHUNK_SIZE": os.getenv("CHUNK_SIZE"),
     "RERANKER_MODEL": os.getenv("RERANKER_MODEL"),
+    # How an organization's vectors are separated from everyone else's.
+    #
+    #   "dual"       - write to the organization's namespace, read that AND the
+    #                  legacy default namespace, merged. The safe default: an
+    #                  existing index keeps working while its vectors are moved.
+    #   "namespaced" - read only the namespace. One query instead of two.
+    #
+    # Move from one to the other with `manage.py migrate_rag_namespaces`.
+    # A fresh deployment pays nothing for "dual": the legacy read is skipped
+    # automatically once the default namespace is seen to be empty.
+    "NAMESPACE_MODE": os.getenv("RAG_NAMESPACE_MODE", "dual"),
 }
 
 # Celery (you already have Redis)
 CELERY_BROKER_URL = (
     f"redis://{REDIS_USERNAME}:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/0"
 )
-CELERY_RESULT_BACKEND = (
-    f"redis://{REDIS_USERNAME}:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/0"
-)
-CELERY_BROKER_POOL_LIMIT = 0
-CELERY_WORKER_PREFETCH_MULTIPLIER = 1
-CELERY_WORKER_MAX_TASKS_PER_CHILD = 1
-CELERY_WORKER_MAX_MEMORY_PER_CHILD = 100000
+
+# No result backend: every task here is fire-and-forget indexing or answering,
+# and nothing ever calls .get(). This used to be assigned twice - once to the
+# Redis URL and again to None a few lines later - so the Redis value never took
+# effect and reading the file suggested otherwise.
 CELERY_RESULT_BACKEND = None
 CELERY_IGNORE_RESULT = True
 CELERY_STORE_ERRORS_EVEN_IF_IGNORED = False
+
+CELERY_BROKER_POOL_LIMIT = 0
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+
+# Was 1, which recycled the worker process after EVERY task. That defeated the
+# per-process RAG client in llm/scripts/tasks.py entirely - its whole purpose
+# is to avoid a Pinecone list_indexes() round trip per task, and a process that
+# lives for exactly one task caches nothing. Every indexing task paid full
+# process startup plus that round trip.
+CELERY_WORKER_MAX_TASKS_PER_CHILD = 200
+
+# ~390MB. The previous ~97MB was tight for a worker holding a Pinecone client,
+# an OpenAI client and a text splitter at once, so children were being recycled
+# on memory long before the task ceiling.
+CELERY_WORKER_MAX_MEMORY_PER_CHILD = 400000
 
 CORS_ALLOWED_ORIGINS = []
 
 CORS_ALLOW_ALL_ORIGINS = True
 
-CORS_ALLOW_HEADERS = list(default_headers) + ["x-access-token", "paginated", "action"]
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    "x-access-token",
+    "x-developer-token",
+    # The organization a request acts in. Missing from this list, the browser
+    # blocks the CORS preflight and EVERY tenant-scoped call fails before it
+    # is sent - which looks like the API being down rather than a header
+    # being unlisted.
+    "x-organization",
+    "paginated",
+    "action",
+]
 
 ROOT_URLCONF = "neon.urls"
 
@@ -153,8 +234,21 @@ DATABASES = {
         "PASSWORD": DB_PASSWORD,
         "HOST": DB_HOST,
         "PORT": DB_PORT,
-    }
+    },
+    "chatterloop": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": CHATTERLOOP_DB_NAME,
+        "USER": CHATTERLOOP_DB_USERNAME,
+        "PASSWORD": CHATTERLOOP_DB_PASSWORD,
+        "HOST": CHATTERLOOP_DB_HOST,
+        "PORT": CHATTERLOOP_DB_PORT,
+        # Nothing in Neon should ever hold a transaction open against another
+        # service's database while it thinks.
+        "ATOMIC_REQUESTS": False,
+    },
 }
+
+DATABASE_ROUTERS = ["chatterloop.routers.ChatterloopRouter"]
 
 
 # Password validation

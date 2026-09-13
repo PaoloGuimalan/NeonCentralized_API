@@ -7,21 +7,57 @@ from rest_framework.pagination import PageNumberPagination
 from messenger.models import Conversation, Message, Summary
 from messenger.serializers import ConversationSerializer, MessageSerializer
 from llm.models import Agent, Model
-from organization.models import Member
-from llm.serializers import ToolSerializer
+from organization.tenancy import (  # noqa: F401  (re-exported, see below)
+    OrganizationResolutionError,
+    organization_for,
+    requested_organization_id,
+)
 from django.http import StreamingHttpResponse
 from neon.utils.parsing_tools import stringify_json
 from django.db.models import Prefetch, Subquery, OuterRef
+from django.db.models.functions import Coalesce
 from django.shortcuts import get_object_or_404
 import uuid
 
-# from llm.services.groq_service import GroqService
 from llm.services.llm_factory import LLMFactory
 from llm.utils.llm_response_parsing import handle_llm_response
 from llm.services.rag import CustomerServiceRAG
 from llm.scripts.tasks import index_chat_message_task
+from user.utils.user_manipulation import get_or_create_account
+from neon.permissions import IsDeveloperToken
 
-rag = CustomerServiceRAG()
+_rag = None
+
+
+def get_rag():
+    """The RAG client, built on first use.
+
+    Constructing it at module level ran CustomerServiceRAG.__init__ - and so
+    Pinecone's list_indexes() - at IMPORT time. Every `manage.py` command paid
+    a network round trip before doing anything, migrations included, and a
+    Pinecone outage stopped Django from starting at all rather than degrading
+    one feature.
+    """
+    global _rag
+    if _rag is None:
+        _rag = CustomerServiceRAG()
+    return _rag
+
+
+EXTERNAL_CHAT_FALLBACK_REPLY = (
+    "Sorry, there is a problem processing your request. Please try again later."
+)
+
+
+# Tenant resolution moved to organization/tenancy.py when the platform API
+# started scoping agents, roles, tools, credentials and knowledge the same way.
+# Re-exported under the names this module already used, so every call site here
+# is unchanged - and there is one definition of "which organization is this
+# caller in" rather than two that can drift apart into a cross-tenant read.
+#
+# The behaviour change worth knowing about: belonging to several organizations
+# is no longer automatically a conflict. A caller can name one with the
+# X-Organization header, and only an unnamed ambiguous case is still a 409.
 
 
 class Pagination(PageNumberPagination):
@@ -55,7 +91,19 @@ class MessagingListView(APIView):
                     )
                 )
                 .filter(created_by=user)
-                .order_by("latest_message_time", "-created_at")
+                # Most recently active first. This was ascending on
+                # latest_message_time, which floated the STALEST conversations
+                # to the top of the list.
+                #
+                # Coalesce rather than a bare "-latest_message_time" because a
+                # conversation with no messages yet has a NULL there, and its
+                # real last activity is when it was created - which is what
+                # puts a brand-new chat at the top instead of at either
+                # extreme by accident of NULL ordering.
+                .order_by(
+                    Coalesce("latest_message_time", "created_at").desc(),
+                    "-created_at",
+                )
             )
 
             paginator = self.pagination_class()
@@ -70,7 +118,7 @@ class MessagingListView(APIView):
 
             return data
         except Exception as ex:
-            return Response(ex, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response(str(ex), status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class MessagingView(APIView):
@@ -81,8 +129,20 @@ class MessagingView(APIView):
         try:
             user = self.request.user
 
+            try:
+                organization = organization_for(
+                    user, requested_organization_id(request)
+                )
+            except OrganizationResolutionError as ex:
+                return Response(
+                    {"status": False, "message": ex.message}, status=ex.status_code
+                )
+
+            # Scoped to the caller's organization. Filtering on the id alone
+            # served any conversation to any authenticated account.
             query_set = Message.objects.filter(
-                conversation_id=conversation_id
+                conversation_id=conversation_id,
+                conversation__organization=organization,
             ).order_by("-created_at")
 
             paginator = self.pagination_class()
@@ -95,7 +155,7 @@ class MessagingView(APIView):
 
             return data
         except Exception as ex:
-            return Response(ex, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response(str(ex), status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def post(self, request, conversation_id):
         try:
@@ -104,13 +164,64 @@ class MessagingView(APIView):
             content = request.data.get("content")
             agent_uuid = request.data.get("agent_uuid")
             model_uuid = request.data.get("model_uuid")
-            pending_id = request.data.get("pending_id")
+            pending_id = request.data.get("pending_id") or uuid.uuid4()
 
-            conversation = Conversation.objects.get(conversation_id=conversation_id)
-            agent = Agent.objects.get(uuid=agent_uuid)
-            enabled_tools_qs = agent.role.tools.filter(is_enabled=True)
-            tools = ToolSerializer(enabled_tools_qs, many=True).data
-            llm_model = Model.objects.get(uuid=model_uuid)
+            try:
+                organization = organization_for(
+                    user, requested_organization_id(request)
+                )
+            except OrganizationResolutionError as ex:
+                return Response(
+                    {"status": False, "message": ex.message}, status=ex.status_code
+                )
+
+            # Both lookups are organization-scoped. Unscoped, these let any
+            # authenticated account post into any conversation and drive any
+            # organization's agent - and therefore spend its LLM credit.
+            try:
+                conversation = Conversation.objects.get(
+                    conversation_id=conversation_id, organization=organization
+                )
+            except Conversation.DoesNotExist:
+                return Response(
+                    {"status": False, "message": "Conversation not found."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            try:
+                agent = Agent.objects.select_related("role").get(
+                    uuid=agent_uuid, organization=organization, is_active=True
+                )
+            except Agent.DoesNotExist:
+                return Response(
+                    {
+                        "status": False,
+                        "message": "Agent not found for this organization.",
+                    },
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            if agent.role is None:
+                return Response(
+                    {
+                        "status": False,
+                        "message": "Agent has no role/system prompt configured.",
+                    },
+                    status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+
+            # Tool INSTANCES, not serialized data: execution needs the
+            # credential, and the credential must never reach a serializer
+            # whose output is handed to a model provider.
+            tools = list(agent.role.tools.filter(is_enabled=True))
+
+            try:
+                llm_model = Model.objects.get(uuid=model_uuid)
+            except Model.DoesNotExist:
+                return Response(
+                    {"status": False, "message": "Model not found."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
 
             llm_service = LLMFactory().create(
                 service=llm_model.service.name,
@@ -118,9 +229,10 @@ class MessagingView(APIView):
                 model=llm_model.model,
             )
 
-            history_query = rag.retrieve(
+            history_query = get_rag().retrieve(
                 content,
                 conversation.conversation_id,
+                conversation.organization_id,
                 conversation.organization.llm_api_key,
                 8,
             )
@@ -159,10 +271,7 @@ class MessagingView(APIView):
 
                         new_message.save()
 
-                        index_chat_message_task.delay(
-                            new_message.message_id,
-                            conversation.organization.llm_api_key,
-                        )
+                        index_chat_message_task.delay(new_message.message_id)
 
                         new_message.receivers.add(user)
                         new_message.seeners.add(user)
@@ -178,9 +287,7 @@ class MessagingView(APIView):
                         )
                         ai_reply.save()
 
-                        index_chat_message_task.delay(
-                            ai_reply.message_id, conversation.organization.llm_api_key
-                        )
+                        index_chat_message_task.delay(ai_reply.message_id)
 
                         ai_reply.receivers.add(user)
                         ai_reply.seeners.add(user)
@@ -204,10 +311,7 @@ class MessagingView(APIView):
 
                             new_message.save()
 
-                            index_chat_message_task.delay(
-                                new_message.message_id,
-                                conversation.organization.llm_api_key,
-                            )
+                            index_chat_message_task.delay(new_message.message_id)
 
                             new_message.receivers.add(user)
                             new_message.seeners.add(user)
@@ -224,10 +328,7 @@ class MessagingView(APIView):
                             )
                             ai_reply.save()
 
-                            index_chat_message_task.delay(
-                                ai_reply.message_id,
-                                conversation.organization.llm_api_key,
-                            )
+                            index_chat_message_task.delay(ai_reply.message_id)
 
                             ai_reply.receivers.add(user)
                             ai_reply.seeners.add(user)
@@ -253,10 +354,39 @@ class ConversationView(APIView):
     def get(self, request, conversation_id):
         try:
             user = self.request.user
-            queryset = get_object_or_404(Conversation, conversation_id=conversation_id)
+
+            try:
+                organization = organization_for(
+                    user, requested_organization_id(request)
+                )
+            except OrganizationResolutionError as ex:
+                return Response(
+                    {"status": False, "message": ex.message}, status=ex.status_code
+                )
+
+            # Scoped to the caller's organization. This lookup was by
+            # conversation_id ALONE - no organization filter and no ownership
+            # check - so any authenticated account could read any
+            # conversation's name and footprint by guessing or harvesting an
+            # id. MessagingView was fixed for exactly this; this route was
+            # missed because it only returns metadata, which is still another
+            # tenant's metadata.
+            # .first() rather than get_object_or_404: the method is wrapped in
+            # a bare `except Exception` that turns everything into a 500, so
+            # Http404 would surface as "server error" - and a 500 on a
+            # conversation that simply is not yours reads as a bug in Neon
+            # rather than as the access rule doing its job.
+            conversation = Conversation.objects.filter(
+                conversation_id=conversation_id, organization=organization
+            ).first()
+            if conversation is None:
+                return Response(
+                    {"status": False, "message": "Conversation not found."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
 
             serialized_conv = ConversationSerializer(
-                queryset, context={"include_latest_message": False}
+                conversation, context={"include_latest_message": False}
             )
 
             return Response(
@@ -272,24 +402,31 @@ class ConversationView(APIView):
             name = request.data.get("name")
             footprint = request.data.get("footprint", None)
 
-            member = Member.objects.get(account=user)
+            try:
+                organization = organization_for(
+                    user, requested_organization_id(request)
+                )
+            except OrganizationResolutionError as ex:
+                return Response(
+                    {"status": False, "message": ex.message}, status=ex.status_code
+                )
 
             if footprint is not None:
                 # Only dedupe when footprint has a value
                 conversation, created = Conversation.objects.get_or_create(
                     footprint=footprint,
                     defaults={
-                        "organization": member.organization,
+                        "organization": organization,
                         "name": name,
-                        "created_by": member.account,
+                        "created_by": user,
                     },
                 )
             else:
                 conversation = Conversation.objects.create(
-                    organization=member.organization,
+                    organization=organization,
                     name=name,
                     footprint=footprint,
-                    created_by=member.account,
+                    created_by=user,
                 )
 
             return Response(
@@ -298,3 +435,212 @@ class ConversationView(APIView):
             )
         except Exception as ex:
             return Response(str(ex), status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ExternalChatView(APIView):
+    """
+    Server-to-server chat endpoint for third-party apps, authenticated via
+    x-developer-token. External callers own their own conversation UI/state
+    and only get back the AI's reply; Neon still records the interaction
+    internally (tied to the real person by email) so it shows up as a normal
+    conversation on Neon's own native frontend.
+    """
+
+    permission_classes = [IsDeveloperToken]
+
+    def post(self, request):
+        try:
+            email = request.data.get("email")
+            first_name = request.data.get("first_name")
+            last_name = request.data.get("last_name")
+            external_conversation_id = request.data.get("external_conversation_id")
+            agent_uuid = request.data.get("agent_uuid")
+            model_uuid = request.data.get("model_uuid")
+            content = request.data.get("content")
+
+            required = {
+                "email": email,
+                "external_conversation_id": external_conversation_id,
+                "agent_uuid": agent_uuid,
+                "model_uuid": model_uuid,
+                "content": content,
+            }
+            missing = [key for key, value in required.items() if not value]
+            if missing:
+                return Response(
+                    {
+                        "status": False,
+                        "message": f"Missing required field(s): {', '.join(missing)}",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # Belonging to several organizations became a normal state once
+            # the API could create them, so this resolves through the shared
+            # helper - which lets an integration whose owner has more than one
+            # name the right one with the X-Organization header instead of
+            # being permanently 409'd.
+            try:
+                organization = organization_for(
+                    request.user, requested_organization_id(request)
+                )
+            except OrganizationResolutionError as ex:
+                return Response(
+                    {"status": False, "message": ex.message}, status=ex.status_code
+                )
+
+            end_user, _ = get_or_create_account(email, first_name, last_name)
+
+            # Namespace the footprint per-organization AND per-person:
+            # Conversation.footprint is globally unique, so without this,
+            # two orgs reusing the same external conversation id (or two
+            # different end-users of the SAME external app both using a
+            # non-globally-unique id, e.g. each user's own "conversation 1")
+            # would collide onto the same Neon conversation and leak each
+            # other's chat history.
+            footprint = f"{organization.id}:{email}:{external_conversation_id}"
+            conversation, _ = Conversation.objects.get_or_create(
+                footprint=footprint,
+                defaults={
+                    "organization": organization,
+                    "name": external_conversation_id,
+                    "created_by": end_user,
+                },
+            )
+            if conversation.organization_id != organization.id:
+                return Response(
+                    {"status": False, "message": "Conversation identifier conflict."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            try:
+                agent = Agent.objects.select_related("role").get(
+                    uuid=agent_uuid, organization=organization, is_active=True
+                )
+            except Agent.DoesNotExist:
+                return Response(
+                    {
+                        "status": False,
+                        "message": "Agent not found for this organization.",
+                    },
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            if agent.role is None:
+                return Response(
+                    {
+                        "status": False,
+                        "message": "Agent has no role/system prompt configured.",
+                    },
+                    status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+
+            try:
+                llm_model = Model.objects.get(uuid=model_uuid)
+            except Model.DoesNotExist:
+                return Response(
+                    {"status": False, "message": "Model not found."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            if not organization.llm_api_key:
+                return Response(
+                    {
+                        "status": False,
+                        "message": "Organization has no LLM API key configured.",
+                    },
+                    status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+
+            llm_service = LLMFactory().create(
+                service=llm_model.service.name,
+                api_key=organization.llm_api_key,
+                model=llm_model.model,
+            )
+            if llm_service is None:
+                return Response(
+                    {
+                        "status": False,
+                        "message": "Unsupported LLM service configured for this model.",
+                    },
+                    status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+
+            # Instances, not serialized data - see MessagingView.post.
+            tools = list(agent.role.tools.filter(is_enabled=True))
+
+            history_query = get_rag().retrieve(
+                content,
+                conversation.conversation_id,
+                conversation.organization_id,
+                organization.llm_api_key,
+                8,
+            )
+            history = [
+                {
+                    "role": ("user" if msg["msg_type"] == "text" else "assistant"),
+                    "content": f'History: {msg["text"]}',
+                }
+                for msg in history_query
+            ]
+
+            full_reply = None
+            attempts = 0
+            max_retries = 3
+
+            while attempts < max_retries:
+                try:
+                    combined = []
+                    for token in llm_service.stream_chat_completion(
+                        history, agent.role.system_prompt, content, tools
+                    ):
+                        if token is not None:
+                            combined.append(token)
+                    full_reply = "".join(combined)
+                    break
+                except Exception:
+                    attempts += 1
+
+            user_message = Message.objects.create(
+                conversation=conversation,
+                sender=end_user,
+                agent=None,
+                integration=request.auth,
+                message_type="text",
+                content=content,
+            )
+            index_chat_message_task.delay(user_message.message_id)
+            user_message.receivers.add(end_user)
+            user_message.seeners.add(end_user)
+
+            reply_content = (
+                handle_llm_response(full_reply)
+                if full_reply is not None
+                else EXTERNAL_CHAT_FALLBACK_REPLY
+            )
+
+            ai_reply = Message.objects.create(
+                conversation=conversation,
+                sender=None,
+                agent=agent,
+                integration=request.auth,
+                message_type="ai_reply",
+                content=reply_content,
+            )
+            index_chat_message_task.delay(ai_reply.message_id)
+            ai_reply.receivers.add(end_user)
+            ai_reply.seeners.add(end_user)
+
+            return Response(
+                {
+                    "conversation_id": str(conversation.conversation_id),
+                    "reply": reply_content,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as ex:
+            return Response(
+                {"status": False, "message": str(ex)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )

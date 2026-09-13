@@ -25,8 +25,18 @@ urlpatterns = [
         include(
             [
                 path("user/", include("user.urls", namespace="api-user")),
+                path("core/", include("core.urls", namespace="api-core")),
                 path(
                     "messenger/", include("messenger.urls", namespace="api-messenger")
+                ),
+                path("llm/", include("llm.urls", namespace="api-llm")),
+                path(
+                    "chatterloop/",
+                    include("chatterloop.urls", namespace="api-chatterloop"),
+                ),
+                path(
+                    "organization/",
+                    include("organization.urls", namespace="api-organization"),
                 ),
             ]
         ),

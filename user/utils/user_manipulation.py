@@ -1,3 +1,4 @@
+import secrets
 from ..models import Account
 from datetime import datetime
 from django.utils.timezone import make_aware
@@ -61,3 +62,35 @@ def create_user(
     except Exception as ex:
         print(str(ex))
         raise ValueError(str(ex))
+
+
+def get_or_create_account(email, first_name=None, last_name=None):
+    """Resolve an Account by email, auto-provisioning one if needed.
+
+    No Member row is created here — org membership isn't required for the
+    account's conversations to show up on Neon's native frontend.
+    """
+    existing = Account.objects.filter(email=email).first()
+    if existing:
+        return existing, False
+
+    try:
+        new_account = create_user(
+            first_name or email.split("@")[0],
+            None,
+            last_name or "N/A",
+            email,
+            secrets.token_urlsafe(24),
+            None,
+            None,
+            None,
+            None,
+            "api",
+        )
+        return new_account, True
+    except ValueError:
+        # Likely a concurrent first-contact request created this email first.
+        existing = Account.objects.filter(email=email).first()
+        if existing:
+            return existing, False
+        raise

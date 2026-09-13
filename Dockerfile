@@ -35,7 +35,13 @@ RUN pip install --no-cache /wheels/*
 
 # Copy the rest of your application code
 COPY . .
-COPY production.env .env
+
+# No env file is baked in. Credentials arrive at runtime: the Swarm stack
+# mounts a secret at /app/.env, which is where load_dotenv() looks. Copying
+# production.env in here used to put the Supabase, Chatterloop, Redis,
+# Pinecone and TOKEN_ENCRYPTION_KEY values into a layer that anyone able to
+# pull the image could read - and mounting a secret over the top does not
+# remove the copy underneath. .dockerignore keeps them out of `COPY . .`.
 
 # Security: Create and use a non-root user
 RUN useradd -m django_user && chown -R django_user /app

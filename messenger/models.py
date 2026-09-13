@@ -1,5 +1,5 @@
 from django.db import models
-from user.models import Account
+from user.models import Account, Token
 from llm.models import Agent
 from organization.models import Organization
 import uuid
@@ -21,7 +21,7 @@ class Conversation(models.Model):
         default=None
     )
     created_by = models.ForeignKey(Account, null=False, on_delete=models.DO_NOTHING)
-    created_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
 
 
 class Message(models.Model):
@@ -41,9 +41,17 @@ class Message(models.Model):
         Account, on_delete=models.DO_NOTHING, null=True, blank=True
     )
     agent = models.ForeignKey(Agent, on_delete=models.DO_NOTHING, null=True, blank=True)
+    integration = models.ForeignKey(
+        Token,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="messages",
+        help_text="The external app/integration this message was sent through, if any. Null means it came from Neon's own native frontend.",
+    )
     message_type = models.CharField(choices=MESSAGE_TYPE_CHOICES, null=False)
     content = models.TextField(null=False)
-    created_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
     replying_to = models.ForeignKey(
         "self", on_delete=models.DO_NOTHING, null=True, blank=True
     )

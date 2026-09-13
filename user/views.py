@@ -1,24 +1,20 @@
-from django.shortcuts import render
-from rest_framework.views import APIView
-from rest_framework.response import Response
+from django.shortcuts import get_object_or_404
 from rest_framework import status
-from rest_framework.permissions import IsAuthenticated, AllowAny
-from django.db.models import (
-    Q,
-)
-from .models import Account
-from core.models import TPAuthentication
-from .utils.user_manipulation import create_user
-from .serializers import (
-    AccountSerializer,
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from core.services.chatterloop_identity import (
+    ChatterloopAuthError,
+    ChatterloopUnavailable,
+    sign_in_with_google,
+    sign_in_with_password,
 )
 from neon.utils.jwt_tools import JWTTools
-from neon.utils.generators import generate_random_digit
-from rest_framework.pagination import PageNumberPagination
-from datetime import datetime
-from django.shortcuts import get_object_or_404
-from django.utils.timezone import localtime
-import bcrypt
+
+from .models import Account
+from .serializers import AccountSerializer
 
 jwt = JWTTools
 
@@ -28,195 +24,114 @@ class Pagination(PageNumberPagination):
     page_size_query_param = "page_size"
 
 
+def _session_response(user):
+    """The token pair Neon's frontend expects, unchanged from before.
+
+    Neon issues its OWN session rather than passing chatterloop's through.
+    That is what keeps a chatterloop outage from signing everybody out: it
+    blocks new sign-ins and leaves existing ones alone.
+    """
+    serialized_user = AccountSerializer(user)
+    return {
+        "status": True,
+        "result": {
+            "usertoken": jwt.encoder(serialized_user.data),
+            "authtoken": jwt.encoder(
+                {"userID": user.username, "username": user.username}
+            ),
+        },
+    }
+
+
+def _auth_error_response(ex):
+    return Response(
+        {"status": False, "message": ex.message},
+        status=ex.status_code,
+    )
+
+
+def _unavailable_response(ex):
+    # 503, not 401. Telling somebody their password is wrong when the real
+    # problem is an unreachable service sends them to reset a working
+    # credential.
+    return Response(
+        {"status": False, "message": str(ex)},
+        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
+
+
 class UserAuthentication(APIView):
+    """Sign in, by forwarding to chatterloop.
+
+    Neon no longer stores or checks passwords. Chatterloop owns credentials,
+    verification and account standing; this view hands the credential over,
+    mirrors the resulting identity into Neon's own Account row, and issues a
+    Neon session. See core/services/chatterloop_identity.py for why forwarding
+    beats reading the password hash directly, given Neon has the database
+    access to do either.
+    """
 
     def get_permissions(self):
         if self.request.method == "GET":
             return [IsAuthenticated()]
-        elif self.request.method == "POST":
-            return [AllowAny()]
-        return super().get_permissions()
+        return [AllowAny()]
 
     def get(self, request, username=None):
         user = get_object_or_404(Account, username=username)
-
-        # Format birthdate parts
-        serialized_user = AccountSerializer(user)
-
-        # Build response JSON matching your example
-        data = serialized_user.data
-
-        return Response(data, status=status.HTTP_200_OK)
+        return Response(AccountSerializer(user).data, status=status.HTTP_200_OK)
 
     def post(self, request):
-        try:
-            email_username = request.data.get("email_username")
-            password = request.data.get("password")
+        email_username = request.data.get("email_username")
+        password = request.data.get("password")
 
-            if not email_username:
-                return Response(
-                    {
-                        "status": False,
-                        "message": "Email is missing",
-                    },
-                    status=status.HTTP_401_UNAUTHORIZED,
-                )
-
-            user = Account.objects.get(
-                Q(email=email_username) | Q(username=email_username)
-            )
-
-            if user:
-                if user.join_type == "system":
-                    if not password:
-                        return Response(
-                            {
-                                "status": False,
-                                "message": "Password is missing",
-                            },
-                            status=status.HTTP_401_UNAUTHORIZED,
-                        )
-
-                hashed = user.password.encode("utf-8")
-                bytes_password = password.encode("utf-8")
-                is_correct = bcrypt.checkpw(bytes_password, hashed)
-
-                if is_correct:
-
-                    serialized_user = AccountSerializer(user)
-
-                    return Response(
-                        {
-                            "status": True,
-                            "result": {
-                                "usertoken": jwt.encoder(serialized_user.data),
-                                "authtoken": jwt.encoder(
-                                    {"userID": user.username, "username": user.username}
-                                ),
-                            },
-                        },
-                        status=status.HTTP_200_OK,
-                    )
-
-                return Response(
-                    {
-                        "status": False,
-                        "message": "Incorrect email, username, or password",
-                    },
-                    status=status.HTTP_401_UNAUTHORIZED,
-                )
-            else:
-                return Response(
-                    {
-                        "status": False,
-                        "message": "Incorrect email, username, or password",
-                    },
-                    status=status.HTTP_401_UNAUTHORIZED,
-                )
-        except Exception as e:
+        if not email_username or not password:
             return Response(
-                {"status": False, "message": f"{e}"},
-                status=status.HTTP_401_UNAUTHORIZED,
+                {
+                    "status": False,
+                    "message": "Chatterloop email/username and password are required.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
             )
+
+        # The credential is handed straight to the forwarder and never stored,
+        # logged or echoed. Note that DRF's own exception reporting can render
+        # request bodies when DEBUG is on, so a production deployment must keep
+        # DEBUG off - which is already how neon/settings.py reads it.
+        try:
+            user = sign_in_with_password(email_username, password)
+        except ChatterloopAuthError as ex:
+            return _auth_error_response(ex)
+        except ChatterloopUnavailable as ex:
+            return _unavailable_response(ex)
+
+        return Response(_session_response(user), status=status.HTTP_200_OK)
 
 
 class ThirdPartyAuthentication(APIView):
+    """Sign in with Google, by forwarding to chatterloop's own Google path.
+
+    Neon's former TPAuthentication table is gone: the `azp` check that used to
+    happen here now happens on chatterloop, against its own registry. Neon's
+    Google client id therefore has to be registered in chatterloop's
+    `core_tpauthentication`, or every Google sign-in fails.
+    """
+
     permission_classes = [AllowAny]
 
     def post(self, request):
+        id_token = request.data.get("token")
+
+        if not id_token:
+            return Response(
+                {"status": False, "message": "A Google credential is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         try:
-            token = request.data.get("token")
+            user = sign_in_with_google(id_token)
+        except ChatterloopAuthError as ex:
+            return _auth_error_response(ex)
+        except ChatterloopUnavailable as ex:
+            return _unavailable_response(ex)
 
-            decoded_token = JWTTools.decoder(token, options={"verify_signature": False})
-
-            if decoded_token:
-                authorization_token = decoded_token["azp"]
-
-                tp_check_query = TPAuthentication.objects.get(
-                    service_id=authorization_token
-                )
-
-                if tp_check_query:
-                    email = decoded_token["email"]
-                    user = Account.objects.filter(email=email)
-
-                    if len(user) > 0:
-                        user = user[0]
-                        serialized_user = AccountSerializer(user)
-
-                        return Response(
-                            {
-                                "status": True,
-                                "result": {
-                                    "usertoken": jwt.encoder(serialized_user.data),
-                                    "authtoken": jwt.encoder(
-                                        {
-                                            "userID": user.username,
-                                            "username": user.username,
-                                        }
-                                    ),
-                                },
-                            },
-                            status=status.HTTP_200_OK,
-                        )
-                    else:
-                        # Automatic registration
-
-                        first_name = decoded_token["given_name"]
-                        middle_name = "N/A"
-                        last_name = decoded_token.get("family_name", None)
-                        email = decoded_token["email"]
-
-                        if last_name is None:
-                            split_name = first_name.split(" ")
-
-                            first_name = split_name[0]
-                            last_name = split_name[1]
-
-                        create_user_query = create_user(
-                            first_name,
-                            middle_name,
-                            last_name,
-                            email,
-                            email,
-                            None,
-                            None,
-                            None,
-                            None,
-                            "google",
-                        )
-
-                        if create_user_query:
-                            serialized_user = AccountSerializer(create_user_query)
-
-                            return Response(
-                                {
-                                    "status": True,
-                                    "result": {
-                                        "usertoken": jwt.encoder(serialized_user.data),
-                                        "authtoken": jwt.encoder(
-                                            {
-                                                "userID": create_user_query.username,
-                                                "username": create_user_query.username,
-                                            }
-                                        ),
-                                    },
-                                },
-                                status=status.HTTP_200_OK,
-                            )
-
-                return Response(
-                    {"status": False, "message": f"User cannot be logged in"},
-                    status=status.HTTP_401_UNAUTHORIZED,
-                )
-
-            return Response(
-                {"status": False, "message": f"Cannot proceed with login"},
-                status=status.HTTP_401_UNAUTHORIZED,
-            )
-        except Exception as e:
-            print(str(e))
-            return Response(
-                {"status": False, "message": f"{e}"},
-                status=status.HTTP_401_UNAUTHORIZED,
-            )
+        return Response(_session_response(user), status=status.HTTP_200_OK)

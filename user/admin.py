@@ -1,6 +1,5 @@
 from django.contrib import admin
-from .models import Account, Verification, Token
+from .models import Account, Token
 
 admin.site.register(Account)
-admin.site.register(Verification)
 admin.site.register(Token)
