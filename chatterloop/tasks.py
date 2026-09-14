@@ -37,6 +37,7 @@ from organization.credentials import CredentialNotConfigured, chat_api_key, embe
 
 from .client import ChatterloopAPIError, TokenRejected, post_comment, send_message
 from .models import ChatterloopBot
+from .ownership import conversation_owner
 from .policy import AddressedOnlyPolicy, build_store
 from .runtime import BotIdentity
 from .triggers import Trigger, TriggerSource
@@ -71,17 +72,30 @@ def _live_token(bot):
 def _mirror_conversation(bot, trigger):
     """Get or create the Neon conversation for this exchange."""
     footprint = footprint_for(bot, trigger)
-    conversation, _ = Conversation.objects.get_or_create(
+    # The bot has no Neon Account of its own, so the conversation is attributed
+    # to the person answerable for what it says. `ownership.conversation_owner`
+    # is that rule and always resolves to somebody - see its module docstring
+    # for why it cannot just be `bot.created_by`.
+    owner = conversation_owner(bot)
+    conversation, created = Conversation.objects.get_or_create(
         footprint=footprint,
         defaults={
             "organization": bot.organization,
             "name": f"@{bot.handle}: {trigger.conversation_id or trigger.post_id}",
-            # The bot has no Neon Account of its own, so the conversation is
-            # attributed to whoever minted it - the person answerable for what
-            # it says.
-            "created_by": bot.created_by,
+            "created_by": owner,
+            # So the conversation list can tell these apart from the owner's
+            # own chats. Attributing them to a person (above) is what puts them
+            # in that list at all, and an unlabelled bot thread sitting among
+            # somebody's real ones is worse than it not being there.
+            "origin": Conversation.ORIGIN_CHATTERLOOP,
         },
     )
+    # Repair a row written while the attribution was still coming back NULL.
+    # One cheap UPDATE, and it means the rule reaches conversations that
+    # already exist rather than only the next new one.
+    if not created and conversation.created_by_id is None and owner is not None:
+        conversation.created_by = owner
+        conversation.save(update_fields=["created_by"])
     return conversation
 
 
