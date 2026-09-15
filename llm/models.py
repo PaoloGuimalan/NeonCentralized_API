@@ -196,6 +196,20 @@ class KnowledgeDocument(models.Model):
     organization = models.ForeignKey(
         Organization, on_delete=models.CASCADE, related_name="knowledge_documents"
     )
+
+    # WHICH AGENTS MAY READ IT. Empty means every agent in the organization,
+    # which is what every document did before this existed - so nothing that
+    # was uploaded already changes meaning, and an organization with one agent
+    # never has to make a choice it does not yet have.
+    #
+    # Naming agents restricts it to exactly those. The reason that matters is
+    # not tidiness: an agent bound to a Chatterloop bot answers people OUTSIDE
+    # the organization, so "every document any member uploads is reachable by
+    # every bot" is a confidentiality decision nobody consciously made.
+    agents = models.ManyToManyField(
+        "Agent", blank=True, related_name="knowledge_documents"
+    )
+
     title = models.CharField(max_length=255)
     source_name = models.CharField(
         max_length=255, blank=True, default="", help_text="Original filename, if any."
@@ -228,6 +242,16 @@ class KnowledgeDocument(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+
+    @property
+    def is_shared(self):
+        """Readable by every agent in the organization.
+
+        The absence of an assignment, not a separate flag - two ways of saying
+        the same thing drift apart, and the one that drifts is the one holding
+        the confidentiality guarantee.
+        """
+        return not self.agents.exists()
 
     def __str__(self):
         return f"{self.title} ({self.organization.name})"

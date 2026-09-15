@@ -252,6 +252,9 @@ def _retrieve(bot, conversation, trigger):
             conversation.organization_id,
             embedding_api_key(bot.organization),
             RETRIEVAL_TOP_K,
+            # The bot answers people outside the organization, so which
+            # documents are in scope is the whole point of passing this.
+            agent=bot.agent,
         )
     except CredentialNotConfigured as ex:
         logger.info("bot %s answering without retrieval: %s", bot.handle, ex)

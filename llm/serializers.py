@@ -251,6 +251,9 @@ class KnowledgeDocumentSerializer(serializers.ModelSerializer):
     # characters, and returning every one of them in a listing would make the
     # knowledge screen unusable. The detail view returns it explicitly.
 
+    agents = serializers.SerializerMethodField()
+    is_shared = serializers.SerializerMethodField()
+
     class Meta:
         model = KnowledgeDocument
         fields = [
@@ -262,8 +265,28 @@ class KnowledgeDocumentSerializer(serializers.ModelSerializer):
             "status",
             "error",
             "chunk_count",
+            "agents",
+            "is_shared",
             "uploaded_by_username",
             "created_at",
             "updated_at",
         ]
         read_only_fields = fields
+
+    def get_agents(self, obj):
+        """Which agents this document is restricted to, if any.
+
+        Names as well as ids: a knowledge screen listing bare uuids cannot tell
+        anybody whether the right agents are on a document, which is the only
+        question worth asking about this field.
+        """
+        return [
+            {"uuid": agent.uuid, "name": agent.name}
+            for agent in obj.agents.all()
+        ]
+
+    def get_is_shared(self, obj):
+        # Read from the same relation the serializer just walked, rather than
+        # the model property, so a prefetched listing does not issue a COUNT
+        # per document.
+        return not obj.agents.all()

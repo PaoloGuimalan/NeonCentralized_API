@@ -22,7 +22,11 @@ from neon.api import OrganizationScopedView, fail, ok
 from organization.credentials import CredentialNotConfigured, embedding_api_key
 
 from .models import Agent, KnowledgeDocument, Model, Role, Service, Tool
-from .scripts.tasks import delete_knowledge_vectors_task, index_knowledge_document_task
+from .scripts.tasks import (
+    delete_knowledge_vectors_task,
+    index_knowledge_document_task,
+    sync_document_scoping_task,
+)
 from .serializers import (
     AgentSerializer,
     KnowledgeDocumentSerializer,
@@ -282,7 +286,52 @@ class ModelListView(OrganizationScopedView):
         return ok(ModelSerializer(models, many=True).data)
 
 
-class KnowledgeListView(OrganizationScopedView):
+class AgentAssignmentMixin:
+    """Resolving `agent_uuids` into agents this organization actually owns."""
+
+    def _resolve_agents(self, request):
+        """Returns `(rejection, agents)` - exactly one of which is None.
+
+        An empty list is a real answer meaning "shared with every agent", and
+        is distinct from the field being absent, which means "leave it alone".
+        The caller tells them apart by checking the request itself.
+        """
+        raw = request.data.get("agent_uuids")
+        if raw is None:
+            return None, None
+
+        if isinstance(raw, str):
+            # A multipart upload cannot send a JSON array, and this endpoint
+            # accepts file uploads - so a comma-separated string is the shape
+            # the browser will actually produce.
+            raw = [part.strip() for part in raw.split(",") if part.strip()]
+        if not isinstance(raw, list):
+            return fail("agent_uuids must be a list of agent uuids."), None
+
+        uuids = [str(value).strip() for value in raw if str(value).strip()]
+        if not uuids:
+            return None, []
+
+        agents = list(
+            Agent.objects.filter(organization=self.organization, uuid__in=uuids)
+        )
+        found = {agent.uuid for agent in agents}
+        missing = [value for value in uuids if value not in found]
+        if missing:
+            # Scoped to the organization, so another tenant's agent reads as
+            # not found rather than as forbidden - a 403 here would confirm
+            # which uuids exist elsewhere.
+            return (
+                fail(
+                    "No such agent in this organization: " + ", ".join(missing),
+                    status.HTTP_404_NOT_FOUND,
+                ),
+                None,
+            )
+        return None, agents
+
+
+class KnowledgeListView(AgentAssignmentMixin, OrganizationScopedView):
     """Documents an organization has indexed, and adding one.
 
     Accepts either a `file` upload or a `content` string, because both are real:
@@ -291,9 +340,13 @@ class KnowledgeListView(OrganizationScopedView):
     """
 
     def get(self, request):
-        documents = KnowledgeDocument.objects.filter(
-            organization=self.organization
-        ).select_related("uploaded_by")
+        documents = (
+            KnowledgeDocument.objects.filter(organization=self.organization)
+            .select_related("uploaded_by")
+            # Without this the serializer walks `agents` per row - a document
+            # listing is exactly where an N+1 hides.
+            .prefetch_related("agents")
+        )
         return ok(KnowledgeDocumentSerializer(documents, many=True).data)
 
     def post(self, request):
@@ -305,6 +358,13 @@ class KnowledgeListView(OrganizationScopedView):
             embedding_api_key(self.organization)
         except CredentialNotConfigured as ex:
             return fail(str(ex), status.HTTP_409_CONFLICT)
+
+        # Resolved before the row exists: a bad uuid should be a 404 with
+        # nothing written, not a document that indexed itself shared because
+        # the assignment step failed after the fact.
+        rejection, agents = self._resolve_agents(request)
+        if rejection is not None:
+            return rejection
 
         upload = request.FILES.get("file")
         if upload is not None:
@@ -337,6 +397,12 @@ class KnowledgeListView(OrganizationScopedView):
             content=content,
             uploaded_by=request.user,
         )
+
+        # BEFORE the indexing task is queued. The task stamps `shared` onto
+        # every vector from the assignment, so setting it afterwards would race
+        # the worker and could index a restricted document as a shared one.
+        if agents:
+            document.agents.set(agents)
 
         # Queued rather than indexed inline: embedding a long document is
         # several provider round trips, and the upload should not hold the
@@ -416,7 +482,7 @@ class KnowledgeListView(OrganizationScopedView):
         return None, (title, content, content_type or "text/plain", upload.size)
 
 
-class KnowledgeDetailView(OrganizationScopedView):
+class KnowledgeDetailView(AgentAssignmentMixin, OrganizationScopedView):
 
     def _document(self, document_id):
         return (
@@ -424,6 +490,7 @@ class KnowledgeDetailView(OrganizationScopedView):
                 id=document_id, organization=self.organization
             )
             .select_related("uploaded_by")
+            .prefetch_related("agents")
             .first()
         )
 
@@ -438,6 +505,42 @@ class KnowledgeDetailView(OrganizationScopedView):
         # would otherwise transfer every character of all of them.
         payload["content"] = document.content
         return ok(payload)
+
+    def patch(self, request, document_id):
+        """Change which agents may read this document.
+
+        Sending `agent_uuids: []` shares it with every agent again, which is
+        the default state and has to stay reachable - otherwise restricting a
+        document is a one-way door.
+        """
+        document = self._document(document_id)
+        if document is None:
+            return fail("Document not found.", status.HTTP_404_NOT_FOUND)
+
+        if "agent_uuids" not in request.data:
+            return fail("Provide agent_uuids to change who may read this.")
+
+        rejection, agents = self._resolve_agents(request)
+        if rejection is not None:
+            return rejection
+
+        was_shared = not document.agents.all()
+        document.agents.set(agents or [])
+        now_shared = not agents
+
+        # Only the shared/restricted transition needs Pinecone touched - which
+        # agents are named among restricted documents is resolved from Postgres
+        # at query time and costs nothing here.
+        if was_shared != now_shared and document.vector_ids:
+            sync_document_scoping_task.delay(document.pk)
+
+        document = self._document(document_id)
+        message = (
+            "Shared with every agent."
+            if now_shared
+            else f"Restricted to {len(agents)} agent(s)."
+        )
+        return ok(KnowledgeDocumentSerializer(document).data, message=message)
 
     def post(self, request, document_id):
         """Re-index. Replaces the previous vectors rather than adding to them."""

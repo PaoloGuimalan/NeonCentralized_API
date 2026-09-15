@@ -226,7 +226,13 @@ class CustomerServiceRAG:
         )
 
     def bulk_index_docs(
-        self, documents, user_openai_key, organization_id, source=None
+        self,
+        documents,
+        user_openai_key,
+        organization_id,
+        source=None,
+        document_id=None,
+        shared=True,
     ):
         """Index documents into the organization's namespace.
 
@@ -256,6 +262,18 @@ class CustomerServiceRAG:
                             "text": chunk,
                             "source": source or doc[:100],
                             "chunk_id": i,
+                            # Which agents may read this. `shared` carries the
+                            # common case in one flag so the query never has to
+                            # enumerate the whole corpus; `document_id` is what
+                            # a restricted document is named by, and is stable
+                            # for the life of the row - reassigning a document
+                            # is then a Postgres change and nothing else.
+                            "shared": bool(shared),
+                            **(
+                                {"document_id": str(document_id)}
+                                if document_id is not None
+                                else {}
+                            ),
                         },
                     }
                 )
@@ -267,6 +285,49 @@ class CustomerServiceRAG:
             )
 
         return [vector["id"] for vector in all_vectors]
+
+    def stamp_scoping(self, vector_ids, organization_id, document_id, shared):
+        """Write `document_id` and `shared` onto vectors that already exist.
+
+        Two callers, one reason each.
+
+        Changing who may read a document is otherwise a re-embed: the answer
+        lives in vector metadata, and the only other way to change it is to
+        throw the vectors away and pay the provider to make them again. This
+        updates the metadata in place, so reassignment costs one pass over the
+        document's own chunks and nothing else.
+
+        The second caller is the backfill. Documents indexed before scoping
+        existed carry neither field, and retrieval matches the shared corpus on
+        `shared: True` - so until they are stamped they are invisible rather
+        than shared, which is the safe direction to be wrong in but not one to
+        leave in place.
+
+        Per-vector because Pinecone's update takes one id at a time; a document
+        is a handful of chunks, and this runs on a worker rather than in a
+        request.
+        """
+        if not vector_ids:
+            return 0
+
+        metadata = {"shared": bool(shared)}
+        if document_id is not None:
+            metadata["document_id"] = str(document_id)
+
+        namespace = self.namespace_for(organization_id)
+        stamped = 0
+        for vector_id in vector_ids:
+            try:
+                self.index.update(
+                    id=vector_id, set_metadata=metadata, namespace=namespace
+                )
+                stamped += 1
+            except Exception:
+                # One chunk failing must not abandon the rest: a half-stamped
+                # document is still better scoped than an unstamped one, and
+                # the command is safe to run again.
+                logger.exception("could not stamp scoping onto vector %s", vector_id)
+        return stamped
 
     def delete_vectors(self, vector_ids, organization_id=None):
         """Remove vectors by id, from the organization's namespace.
@@ -315,9 +376,20 @@ class CustomerServiceRAG:
         return [{"msg_type": msg.message_type, "text": msg.content} for msg in recent]
 
     def retrieve(
-        self, query, conversationID, organization_id, user_openai_key, top_k=5
+        self,
+        query,
+        conversationID,
+        organization_id,
+        user_openai_key,
+        top_k=5,
+        agent=None,
     ):
-        """Context for one question: recent turns, plus whatever else is relevant."""
+        """Context for one question: recent turns, plus whatever else is relevant.
+
+        `agent` decides which documents are in scope. Omitting it is not a way
+        to see everything - it means the caller could not say who is asking,
+        and only the shared corpus answers.
+        """
         history = self.get_history(conversationID, 4)
 
         try:
@@ -329,26 +401,23 @@ class CustomerServiceRAG:
             logger.exception("could not embed the query; returning history only")
             return history
 
-        matches = self._search(query_vec, conversationID, organization_id)
+        matches = self._search(query_vec, conversationID, organization_id, agent)
         if not matches:
             return history
 
         retrieved = self._rerank(query, matches, top_k)
         return history + self._without_history(retrieved, history)
 
-    def _search(self, query_vec, conversationID, organization_id):
+    def _search(self, query_vec, conversationID, organization_id, agent=None):
         """Query the organization's namespace, and the legacy one if it still has data."""
+        from llm.knowledge import document_filter_terms
+
         namespace = self.namespace_for(organization_id)
 
         # Inside a namespace every vector already belongs to this organization,
-        # so the filter narrows by KIND rather than by tenant: documents the
-        # organization owns, plus chat from this conversation only.
-        scoped_filter = {
-            "$or": [
-                {"type": "doc"},
-                {"conversation_id": str(conversationID)},
-            ]
-        }
+        # so the filter narrows by KIND rather than by tenant: the documents
+        # this AGENT may read, plus chat from this conversation only.
+        scoped_filter = {"$or": document_filter_terms(agent, conversationID)}
 
         matches = list(
             self._query(query_vec, namespace=namespace, filters=scoped_filter)
@@ -358,6 +427,12 @@ class CustomerServiceRAG:
             # The old layout: one namespace for everyone, separated by
             # metadata. The organization_id term is what keeps this from
             # reading another tenant's vectors, and is not optional here.
+            #
+            # Deliberately NOT agent-scoped. These vectors predate assignment
+            # and carry neither `shared` nor `document_id`, so scoping them
+            # would hide every one of them rather than restrict any of them.
+            # They are shared by definition - there was no other kind when they
+            # were written - and `migrate_rag_namespaces` is what empties this.
             legacy_filter = {
                 "$or": [
                     {"type": "doc", "organization_id": str(organization_id)},

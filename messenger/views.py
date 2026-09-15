@@ -235,6 +235,7 @@ class MessagingView(APIView):
                 conversation.organization_id,
                 conversation.organization.llm_api_key,
                 8,
+                agent=agent,
             )
             history = []
 
@@ -575,6 +576,7 @@ class ExternalChatView(APIView):
                 conversation.organization_id,
                 organization.llm_api_key,
                 8,
+                agent=agent,
             )
             history = [
                 {

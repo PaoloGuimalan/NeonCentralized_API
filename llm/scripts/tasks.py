@@ -74,6 +74,46 @@ def index_chat_message_task(message_id):
 
 
 @shared_task
+def sync_document_scoping_task(document_id):
+    """Push a changed agent assignment onto the document's existing vectors.
+
+    Only the `shared` flag can actually change here: `document_id` is stable
+    for the life of the row. But which agents are named decides whether the
+    document is shared, and that flag is what the shared corpus is matched on -
+    so restricting a document that nobody stamps stays readable by every agent,
+    which is the one failure this whole feature exists to prevent.
+
+    On a worker rather than in the request: it is one Pinecone call per chunk,
+    and the user changing a checkbox should not wait for them.
+    """
+    from llm.models import KnowledgeDocument
+
+    document = (
+        KnowledgeDocument.objects.filter(pk=document_id)
+        .prefetch_related("agents")
+        .first()
+    )
+    if document is None or not document.vector_ids:
+        # Nothing indexed yet. The upload path stamps at index time, so there
+        # is nothing here to correct.
+        return
+
+    stamped = get_rag().stamp_scoping(
+        list(document.vector_ids),
+        organization_id=document.organization_id,
+        document_id=document.pk,
+        shared=document.is_shared,
+    )
+    logger.info(
+        "scoping synced for document %s: shared=%s, %s/%s chunks",
+        document_id,
+        document.is_shared,
+        stamped,
+        len(document.vector_ids),
+    )
+
+
+@shared_task
 def index_knowledge_document_task(document_id):
     """Embed and index one uploaded document.
 
@@ -108,6 +148,11 @@ def index_knowledge_document_task(document_id):
             api_key,
             document.organization_id,
             source=document.title,
+            # What retrieval scopes on. Written at index time so a freshly
+            # uploaded document is correctly scoped from its first query,
+            # rather than correct only after something else stamps it.
+            document_id=document.pk,
+            shared=document.is_shared,
         )
         if previous:
             rag.delete_vectors(previous, organization_id=document.organization_id)
