@@ -65,11 +65,63 @@ class Pagination(PageNumberPagination):
     page_size_query_param = "page_size"
 
 
+ORIGIN_PARAM = "origin"
+
+VALID_ORIGINS = {value for value, _ in Conversation.ORIGIN_CHOICES}
+
+
+class InvalidOrigin(Exception):
+    def __init__(self, message):
+        super().__init__(message)
+        self.message = message
+
+
+def requested_origins(request):
+    """Which surfaces the caller wants listed, or None for all of them.
+
+    Accepts both spellings - repeated (?origin=native&origin=external) and
+    comma-separated (?origin=native,external) - because a hand-written link
+    reaches for one and a form serializer for the other, and rejecting either
+    would be a rule nobody can guess.
+
+    AN UNKNOWN VALUE IS A 400, NOT "EVERYTHING"
+    -------------------------------------------
+    Falling back to unfiltered on a typo is the worse failure by a distance:
+    the one thing this parameter exists to do is keep a caller from seeing
+    threads it did not ask for, and a silent fallback shows them ALL of them -
+    bot mirrors included - while reporting success.
+    """
+    raw = request.query_params.getlist(ORIGIN_PARAM)
+    wanted = {
+        value.strip() for item in raw for value in item.split(",") if value.strip()
+    }
+    if not wanted:
+        return None
+
+    unknown = sorted(wanted - VALID_ORIGINS)
+    if unknown:
+        raise InvalidOrigin(
+            f"Unknown {ORIGIN_PARAM}: {', '.join(unknown)}. "
+            f"One of: {', '.join(sorted(VALID_ORIGINS))}."
+        )
+    return wanted
+
+
 class MessagingListView(APIView):
     permission_classes = [IsAuthenticated]
     pagination_class = Pagination
 
     def get(self, request):
+        # Before the broad handler below, which would turn a bad parameter into
+        # a 500 that says nothing about which value was wrong.
+        try:
+            origins = requested_origins(request)
+        except InvalidOrigin as ex:
+            return Response(
+                {"status": False, "message": ex.message},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         try:
             user = self.request.user
 
@@ -105,6 +157,11 @@ class MessagingListView(APIView):
                     "-created_at",
                 )
             )
+
+            if origins is not None:
+                # Applied after ordering for readability only - a queryset is
+                # lazy, so this is one WHERE on `origin`, which is indexed.
+                query_set = query_set.filter(origin__in=origins)
 
             paginator = self.pagination_class()
             paginated_queryset = paginator.paginate_queryset(
@@ -420,6 +477,7 @@ class ConversationView(APIView):
                         "organization": organization,
                         "name": name,
                         "created_by": user,
+                        "origin": Conversation.ORIGIN_NATIVE,
                     },
                 )
             else:
@@ -428,6 +486,7 @@ class ConversationView(APIView):
                     name=name,
                     footprint=footprint,
                     created_by=user,
+                    origin=Conversation.ORIGIN_NATIVE,
                 )
 
             return Response(
@@ -506,6 +565,12 @@ class ExternalChatView(APIView):
                     "organization": organization,
                     "name": external_conversation_id,
                     "created_by": end_user,
+                    # Recorded so the conversation list can say this thread
+                    # happened in somebody else's app. The messages carry
+                    # `integration` for WHICH app; this is the row-level answer
+                    # to "was this ours", which a conversation with no messages
+                    # yet would otherwise have no way to give.
+                    "origin": Conversation.ORIGIN_EXTERNAL,
                 },
             )
             if conversation.organization_id != organization.id:

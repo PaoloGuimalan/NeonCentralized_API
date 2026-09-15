@@ -16,7 +16,15 @@ from llm.models import Agent
 from neon.utils.crypto import decrypt, encrypt
 from neon.utils.identifiers import new_id
 from organization.models import Organization
-from user.models import Account
+
+# Aliased, and not for style. `Account` is a name BOTH sides of this split use:
+# `user.Account` is Neon's own row, `external_models.Account` is the projection
+# of chatterloop's `user_account`. While this was imported bare, it sat above
+# the `from .external_models import ...` block and quietly won the name - so
+# `from chatterloop.models import Account` handed out Neon's table while
+# reading as chatterloop's, and core/services/chatterloop_identity.py spent its
+# life looking up sign-ins in the wrong database.
+from user.models import Account as NeonAccount
 
 from .external_models import (  # noqa: F401
     Account as ChatterloopAccount,
@@ -96,7 +104,7 @@ class ChatterloopBot(models.Model):
         Organization, on_delete=models.CASCADE, related_name="chatterloop_bots"
     )
     created_by = models.ForeignKey(
-        Account,
+        NeonAccount,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
