@@ -514,15 +514,21 @@ class BotRuntime:
 
     def _decide(self, trigger):
         decision = self.policy.evaluate(trigger)
-        # Recorded whatever the verdict: a redelivery of something already
-        # judged should not be judged again.
-        self.policy.record_seen(trigger.dedupe_key)
+
+        # Recorded for anything FINISHED WITH - a redelivery of something
+        # already judged should not be judged again. A transient refusal is not
+        # finished with: recording it would mean the probe skips this message
+        # forever, so the refusal that was supposed to last an hour lasts for
+        # good and the conversation never resumes.
+        if not decision.transient:
+            self.policy.record_seen(trigger.dedupe_key)
 
         if not decision.should_respond:
             self.stats["ignored"] += 1
             logger.info(
-                "not replying (%s) to %s in %s",
+                "not replying (%s%s) to %s in %s",
                 decision.reason,
+                "; will reconsider" if decision.transient else "",
                 trigger.reason,
                 trigger.conversation_id or trigger.post_id,
             )
@@ -530,9 +536,10 @@ class BotRuntime:
 
         self.stats["dispatched"] += 1
         logger.info(
-            "dispatching answer (%s) for %s in %s",
+            "dispatching answer (%s%s) for %s in %s",
             decision.reason,
+            f" after {decision.delay:.1f}s" if decision.delay else "",
             trigger.reason,
             trigger.conversation_id or trigger.post_id,
         )
-        self.dispatch(trigger)
+        self.dispatch(trigger, decision.delay)

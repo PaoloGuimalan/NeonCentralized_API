@@ -119,7 +119,10 @@ def build_runtime(api, **kwargs):
         identity=identity,
         policy=policy,
         token="clt_test",
-        dispatch=dispatched.append,
+        # Two arguments now: the runtime passes the cooldown a collaborating
+        # bot should wait before answering, which the supervisor turns into a
+        # Celery countdown. Recorded so a test can assert on it.
+        dispatch=lambda trigger, delay=0.0: dispatched.append(trigger),
         api=api,
         **kwargs,
     )

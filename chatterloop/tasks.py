@@ -38,6 +38,7 @@ from organization.credentials import CredentialNotConfigured, chat_api_key, embe
 from .client import ChatterloopAPIError, TokenRejected, post_comment, send_message
 from .models import ChatterloopBot
 from .ownership import conversation_owner
+from .authors import is_bot_entity
 from .policy import AddressedOnlyPolicy, build_store
 from .runtime import BotIdentity
 from .triggers import Trigger, TriggerSource
@@ -237,7 +238,12 @@ def answer_trigger(bot_id, payload):
 
     # Only now. See the module docstring.
     identity = BotIdentity(bot.entity_id, bot.verified_handle or bot.handle)
-    policy = AddressedOnlyPolicy(identity, store=build_store(bot.pk))
+    policy = AddressedOnlyPolicy(
+        identity,
+        store=build_store(bot.pk),
+        is_bot_author=is_bot_entity,
+        allow_bot_conversations=bot.allow_bot_conversations,
+    )
     policy.record_reply(trigger)
 
     _mirror_message(conversation, reply, "ai_reply", agent=bot.agent)

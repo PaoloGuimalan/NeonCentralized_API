@@ -204,6 +204,27 @@ class ChatterloopBot(models.Model):
     # When the switch was last flipped, so the UI can say "offline since
     # Tuesday" rather than just "offline".
     online_changed_at = models.DateTimeField(null=True, blank=True)
+
+    # WHETHER THIS BOT WILL TALK TO OTHER BOTS.
+    #
+    # Off by default, and deliberately so: two bots that answer each other
+    # never run out of things to say. Every threaded reply re-addresses the
+    # other, so there is no natural end - only the models deciding they are
+    # finished, which is a judgement they may not make.
+    #
+    # On, the bot answers bot-authored triggers and the hourly cap is replaced
+    # by a per-conversation TURN BUDGET, so a collaboration that does not end
+    # itself still ends. Both bots need it on: each one checks its own flag, so
+    # one bot with it off is enough to stop the exchange - which is also how
+    # you stop one that is running.
+    allow_bot_conversations = models.BooleanField(
+        default=False,
+        help_text=(
+            "Let this bot reply to other bots, so two bots can work through a "
+            "task together. Bounded by a per-conversation turn budget."
+        ),
+    )
+
     # Why it stopped. Shown to the user, because "my bot went quiet" with no
     # explanation is the single most expensive kind of failure here.
     status_reason = models.TextField(blank=True, default="")

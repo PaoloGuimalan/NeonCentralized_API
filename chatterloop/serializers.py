@@ -88,6 +88,7 @@ class ChatterloopBotSerializer(serializers.ModelSerializer):
             "can_answer",
             "is_online",
             "online_changed_at",
+            "allow_bot_conversations",
             "should_run",
             "running",
             "owner_name",
@@ -189,6 +190,7 @@ class UpdateBotSerializer(serializers.Serializer):
     agent_uuid = serializers.CharField(required=False, allow_blank=True)
     model_uuid = serializers.CharField(required=False, allow_blank=True)
     credential_id = serializers.CharField(required=False, allow_blank=True)
+    allow_bot_conversations = serializers.BooleanField(required=False)
 
 
 class RotateTokenSerializer(serializers.Serializer):

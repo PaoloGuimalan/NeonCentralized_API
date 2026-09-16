@@ -262,11 +262,17 @@ class BotDetailView(BotViewMixin, OrganizationScopedView):
         if "description" in data:
             bot.description = data["description"]
 
+        # Read by the supervisor when it builds this bot's policy, so it takes
+        # effect on the next sweep rather than needing anything restarted.
+        if "allow_bot_conversations" in data:
+            bot.allow_bot_conversations = data["allow_bot_conversations"]
+
         bot.save(
             update_fields=[
                 "agent",
                 "model",
                 "provider_credential",
+                "allow_bot_conversations",
                 "name",
                 "description",
                 "updated_at",

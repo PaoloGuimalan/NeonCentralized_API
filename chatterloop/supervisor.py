@@ -41,6 +41,7 @@ from django.utils.timezone import now
 from .client import ChatterloopAPIError, TokenRejected, stream_events
 from .control import listen
 from .leases import LeaseManager, RENEW_INTERVAL_SECONDS
+from .authors import is_bot_entity
 from .policy import AddressedOnlyPolicy, build_store
 from .runtime import BotIdentity, BotRuntime
 
@@ -72,7 +73,12 @@ class BotWorker:
         self.fatal = ""
 
         identity = BotIdentity(bot.entity_id, bot.verified_handle or bot.handle)
-        policy = AddressedOnlyPolicy(identity, store=build_store(bot.pk))
+        policy = AddressedOnlyPolicy(
+            identity,
+            store=build_store(bot.pk),
+            is_bot_author=is_bot_entity,
+            allow_bot_conversations=bot.allow_bot_conversations,
+        )
         self.runtime = BotRuntime(
             identity=identity,
             policy=policy,
@@ -85,12 +91,21 @@ class BotWorker:
             started_at_ms=lease_acquired_ms,
         )
 
-    def _dispatch(self, trigger):
+    def _dispatch(self, trigger, delay=0.0):
         # Imported here rather than at module import: Celery's task registry
         # wants Django set up, and this module is imported by a management
         # command that does that itself.
         from .tasks import answer_trigger
 
+        if delay > 0:
+            # The cooldown, kept as pacing rather than spent as a refusal. Two
+            # bots answering each other instantly reads as machinery; a few
+            # seconds apart reads as a conversation, and it is the same wait
+            # either way - the only question was whether the turn survived it.
+            answer_trigger.apply_async(
+                args=[self.bot_id, trigger.to_payload()], countdown=delay
+            )
+            return
         answer_trigger.delay(self.bot_id, trigger.to_payload())
 
     def start(self):
