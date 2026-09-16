@@ -187,6 +187,33 @@ def fetch_messages(token, conversation_id, limit=40):
     )
 
 
+def fetch_thread(token, conversation_id, message_id, limit=20):
+    """The reply lineage of one message: what it answers, and what that answered.
+
+    Returns `(messages, truncated)`. Oldest first, ending with the message
+    itself - the server walks `replyingTo` upward, which a client cannot: the
+    parent of a reply is regularly older than any window worth fetching, and
+    there is no route that reads a message by id.
+
+    `truncated` is why this returns a pair. It says the walk stopped at the
+    limit or at a broken link rather than at the start of the thread, and a
+    partial lineage read as a whole one is exactly the case where an answer
+    confidently misses the point.
+    """
+    if not conversation_id or not message_id:
+        return [], False
+    payload = request(
+        "GET",
+        f"/v1/conversations/{conversation_id}/messages/{message_id}/thread",
+        token,
+        params={"limit": max(1, min(int(limit), 50))},
+    )
+    return (
+        _messages_from(payload, conversation_id),
+        bool(payload.get("truncated")),
+    )
+
+
 def conversation_type(token, conversation_id):
     """Whether this is a DM: "single", something else, or "" if unresolvable.
 

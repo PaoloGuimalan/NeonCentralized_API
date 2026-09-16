@@ -118,28 +118,59 @@ def _validate_endpoint(url):
 
 
 def _build_headers(tool):
-    """Headers for one call: the declared ones, plus the credential.
+    """Headers for one call: the declared ones, and the credential where they
+    leave a gap.
 
     Tool.authentication is accepted in either shape people actually store: a
     JSON object of header name -> value, or a bare string, which is treated as
     an Authorization value. Guessing between them beats a silent "why is my
     tool returning 401" with no indication of which was expected.
+
+    DECLARED HEADERS WIN
+    --------------------
+    `authentication` fills in what `headers_schema` did not set; it never
+    replaces it. The other order cost an afternoon: a tool with a correct
+    `Authorization: Bearer clt_...` in its declared headers kept getting 401s,
+    because a stale value left in `authentication` from an earlier attempt was
+    applied afterwards and overwrote it. Everything visible in the form was
+    right and an invisible field decided the call.
+
+    Explicit beats implicit, and the declared header is the explicit one - it
+    names the header it sets. `authentication` is a convenience that says
+    "put this somewhere sensible", which is exactly the thing that should yield.
+
+    MATCHED CASE-INSENSITIVELY
+    --------------------------
+    HTTP header names are case-insensitive, so `authorization` in the declared
+    headers has to block `Authorization` from the credential. Comparing them
+    literally would put both on the request and leave which one wins to the
+    HTTP library.
     """
     headers = {}
     if isinstance(tool.headers_schema, dict):
         headers.update({str(k): str(v) for k, v in tool.headers_schema.items()})
 
-    if tool.requires_auth and tool.authentication:
-        credential = tool.authentication.strip()
-        try:
-            parsed = json.loads(credential)
-        except (ValueError, TypeError):
-            parsed = None
+    if not (tool.requires_auth and tool.authentication):
+        return headers
 
-        if isinstance(parsed, dict):
-            headers.update({str(k): str(v) for k, v in parsed.items()})
-        else:
-            headers["Authorization"] = credential
+    declared = {name.lower() for name in headers}
+
+    credential = tool.authentication.strip()
+    try:
+        parsed = json.loads(credential)
+    except (ValueError, TypeError):
+        parsed = None
+
+    if isinstance(parsed, dict):
+        supplied = {str(k): str(v) for k, v in parsed.items()}
+    else:
+        supplied = {"Authorization": credential}
+
+    for name, value in supplied.items():
+        if name.lower() in declared:
+            # Already answered, and by the more specific of the two.
+            continue
+        headers[name] = value
 
     return headers
 

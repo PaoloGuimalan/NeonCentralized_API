@@ -168,7 +168,7 @@ class AnsweringTests(CredentialTestCase):
         )
         with patch("chatterloop.tasks.LLMFactory") as factory, patch(
             "chatterloop.tasks.send_message"
-        ), patch("chatterloop.tasks._retrieve", return_value=[]):
+        ), patch("chatterloop.tasks._retrieve", return_value=[]), patch("chatterloop.tasks.fetch_messages", return_value=([], "group")), patch("chatterloop.tasks.fetch_thread", return_value=([], False)):
             factory.return_value.create.side_effect = create
             answer_trigger(str(bot.pk), trigger.to_payload())
         return captured.get("api_key")

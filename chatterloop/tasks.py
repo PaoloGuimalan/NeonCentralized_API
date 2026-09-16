@@ -35,10 +35,18 @@ from llm.services.llm_factory import LLMFactory
 from messenger.models import Conversation, Message
 from organization.credentials import CredentialNotConfigured, chat_api_key, embedding_api_key
 
-from .client import ChatterloopAPIError, TokenRejected, post_comment, send_message
+from .client import (
+    ChatterloopAPIError,
+    TokenRejected,
+    fetch_messages,
+    fetch_thread,
+    post_comment,
+    send_message,
+)
 from .models import ChatterloopBot
 from .ownership import conversation_owner
 from .authors import is_bot_entity
+from .context import CHAIN_LIMIT, RECENT_LIMIT, build
 from .policy import AddressedOnlyPolicy, build_store
 from .runtime import BotIdentity
 from .triggers import Trigger, TriggerSource
@@ -166,6 +174,10 @@ def answer_trigger(bot_id, payload):
         logger.warning("bot %s has no live token; not answering", bot.handle)
         return
 
+    # Decrypted once, here, because both reading the conversation and sending
+    # the reply need it.
+    token_value = credential.token
+
     try:
         # The bot's own key when it has one, the organization's default
         # otherwise - see organization/credentials.py for why a mismatched
@@ -180,7 +192,28 @@ def answer_trigger(bot_id, payload):
     conversation = _mirror_conversation(bot, trigger)
     _mirror_message(conversation, trigger.text or trigger.query, "text")
 
-    context = _retrieve(bot, conversation, trigger)
+    # Two sources covering different gaps. The conversation is what was
+    # actually said - recency plus this reply's lineage. Retrieval is for what
+    # the conversation does not contain at all: an uploaded document, or
+    # something from far outside both windows.
+    #
+    # Retrieval first, conversation second, so the transcript is what the model
+    # reads last and answers from.
+    try:
+        context = _retrieve(bot, conversation, trigger) + _conversation_context(
+            bot, token_value, trigger
+        )
+    except TokenRejected as ex:
+        # Handled HERE rather than swallowed in the reader. The token is dead,
+        # so the send a few lines down would fail too - returning now says so
+        # once, clearly, instead of paying a provider for an answer that cannot
+        # be delivered.
+        logger.error(
+            "bot %s: token rejected while reading the conversation: %s",
+            bot.handle,
+            ex.message,
+        )
+        return
 
     llm = LLMFactory().create(
         service=bot.model.service.name,
@@ -218,7 +251,6 @@ def answer_trigger(bot_id, payload):
         # trimmed one: the user gets nothing at all.
         reply = reply[: MAX_REPLY_CHARS - 1].rstrip() + "…"
 
-    token_value = credential.token
     try:
         if trigger.source is TriggerSource.COMMENT:
             post_comment(token_value, trigger.post_id, reply, trigger.comment_id)
@@ -256,8 +288,65 @@ def answer_trigger(bot_id, payload):
     )
 
 
+def _conversation_context(bot, token, trigger):
+    """The two histories: the newest messages, and this reply's own lineage.
+
+    Read here rather than in the supervisor. The supervisor's job is to decide
+    cheaply - one extra API read per ANSWER is affordable, one per FRAME is
+    not, and most frames are answered by nobody.
+
+    Each read is independently optional. A bot that cannot fetch the thread
+    still answers with the window, and one that can fetch neither still answers
+    the message in front of it, which is what it did before any of this
+    existed.
+    """
+    if not trigger.conversation_id:
+        # A comment. Threading there is a different shape and a different route.
+        return []
+
+    recent, chain = [], []
+
+    try:
+        recent, _ = fetch_messages(token, trigger.conversation_id, RECENT_LIMIT * 3)
+    except TokenRejected:
+        raise
+    except Exception:
+        logger.exception("bot %s could not read the conversation", bot.handle)
+
+    if trigger.message_id:
+        try:
+            chain, truncated = fetch_thread(
+                token, trigger.conversation_id, trigger.message_id, CHAIN_LIMIT
+            )
+            if truncated:
+                # Worth a line: the answer is being written against the tail of
+                # a longer thread, and that is the case where it can confidently
+                # miss the point.
+                logger.info(
+                    "bot %s: thread for %s is truncated at %s message(s)",
+                    bot.handle,
+                    trigger.message_id,
+                    len(chain),
+                )
+        except TokenRejected:
+            raise
+        except Exception:
+            logger.exception("bot %s could not read the reply thread", bot.handle)
+
+    identity = BotIdentity(bot.entity_id, bot.verified_handle or bot.handle)
+    turns = build(recent, chain, trigger.message_id, identity=identity)
+    logger.info(
+        "bot %s: %s turn(s) of context (%s recent, %s in thread)",
+        bot.handle,
+        len(turns),
+        len(recent),
+        len(chain),
+    )
+    return turns
+
+
 def _retrieve(bot, conversation, trigger):
-    """Context for the model, in the shape the LLM services expect.
+    """Semantic recall, for what the conversation itself does not contain.
 
     Retrieval failing is not fatal. An unconfigured embedding key, or a
     Pinecone outage, should cost the bot its memory for that turn - not its
@@ -272,6 +361,12 @@ def _retrieve(bot, conversation, trigger):
             conversation.organization_id,
             embedding_api_key(bot.organization),
             RETRIEVAL_TOP_K,
+            # The conversation is read from chatterloop now, with the reply
+            # chain walked. RAG's own history is the last four rows of Neon's
+            # mirror, which holds only messages a bot already answered - so it
+            # is both shorter and full of holes, and sending both showed the
+            # model the same turns twice.
+            include_history=False,
             # The bot answers people outside the organization, so which
             # documents are in scope is the whole point of passing this.
             agent=bot.agent,

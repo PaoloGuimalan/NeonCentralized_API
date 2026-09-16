@@ -323,7 +323,7 @@ class QueuedWorkTests(OnlineTestCase):
 
         with patch("chatterloop.tasks.LLMFactory") as factory, patch(
             "chatterloop.tasks.send_message"
-        ) as send, patch("chatterloop.tasks._retrieve", return_value=[]):
+        ) as send, patch("chatterloop.tasks._retrieve", return_value=[]), patch("chatterloop.tasks.fetch_messages", return_value=([], "group")), patch("chatterloop.tasks.fetch_thread", return_value=([], False)):
             factory.return_value.create.return_value = FakeLLM()
             answer_trigger(str(self.bot.pk), self.trigger().to_payload())
         return send

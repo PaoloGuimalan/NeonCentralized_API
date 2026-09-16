@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from django.test import SimpleTestCase, TestCase
 
+from chatterloop.client import TokenRejected
 from chatterloop.leases import LeaseManager, lease_key
 from chatterloop.models import ChatterloopBot
 from chatterloop.policy import AddressedOnlyPolicy, InMemoryPolicyStore
@@ -220,6 +221,15 @@ class AnswerTaskTests(TestCase):
         }
         with patch("chatterloop.tasks.LLMFactory") as factory, patch(
             "chatterloop.tasks._retrieve", return_value=[]
+        ), patch(
+            # The conversation and its reply chain are read from chatterloop
+            # before answering. Stubbed so these stay hermetic - what they are
+            # about is the answer, and test_context covers the merge.
+            "chatterloop.tasks.fetch_messages",
+            return_value=(patches.get("recent", []), "group"),
+        ), patch(
+            "chatterloop.tasks.fetch_thread",
+            return_value=(patches.get("chain", []), False),
         ), patch("chatterloop.tasks.send_message") as send, patch(
             "chatterloop.tasks.post_comment"
         ) as comment:
@@ -358,6 +368,10 @@ class AnswerTaskTests(TestCase):
         bot its memory for that turn, not its ability to answer."""
         with patch("chatterloop.tasks.LLMFactory") as factory, patch(
             "chatterloop.tasks.embedding_api_key", side_effect=RuntimeError("boom")
+        ), patch(
+            "chatterloop.tasks.fetch_messages", return_value=([], "group")
+        ), patch(
+            "chatterloop.tasks.fetch_thread", return_value=([], False)
         ), patch("chatterloop.tasks.send_message") as send, patch(
             "chatterloop.tasks.post_comment"
         ):
@@ -365,6 +379,53 @@ class AnswerTaskTests(TestCase):
             answer_trigger(str(self.bot.pk), self.trigger().to_payload())
 
         send.assert_called_once()
+
+    def test_reading_the_conversation_failing_does_not_stop_the_answer(self):
+        """The same guarantee for the other history. Both reads are enrichment:
+        a bot that cannot fetch the thread still answers the message in front
+        of it, which is what it did before either existed."""
+        with patch("chatterloop.tasks.LLMFactory") as factory, patch(
+            "chatterloop.tasks._retrieve", return_value=[]
+        ), patch(
+            "chatterloop.tasks.fetch_messages", side_effect=RuntimeError("boom")
+        ), patch(
+            "chatterloop.tasks.fetch_thread", side_effect=RuntimeError("boom")
+        ), patch("chatterloop.tasks.send_message") as send, patch(
+            "chatterloop.tasks.post_comment"
+        ):
+            factory.return_value.create.return_value = self.llm
+            answer_trigger(str(self.bot.pk), self.trigger().to_payload())
+
+        send.assert_called_once()
+
+    def test_a_dead_token_stops_before_the_model_is_called(self):
+        """A token rejected while READING means the send would fail too, so
+        there is no point paying a provider for an answer nobody can receive."""
+        with patch("chatterloop.tasks.LLMFactory") as factory, patch(
+            "chatterloop.tasks._retrieve", return_value=[]
+        ), patch(
+            "chatterloop.tasks.fetch_messages",
+            side_effect=TokenRejected("Invalid or expired token."),
+        ), patch("chatterloop.tasks.send_message") as send, patch(
+            "chatterloop.tasks.post_comment"
+        ):
+            factory.return_value.create.return_value = self.llm
+            answer_trigger(str(self.bot.pk), self.trigger().to_payload())
+
+        send.assert_not_called()
+        self.assertEqual(self.llm.calls, [], "the model must not have been called")
+
+    def test_both_histories_reach_the_model(self):
+        """The whole point: recency AND the reply lineage, merged."""
+        recent = [{"message_id": "r1", "created_at": 900, "content": "most recent",
+                   "sender_entity_id": "entity-human"}]
+        chain = [{"message_id": "c1", "created_at": 10, "content": "the original ask",
+                  "sender_entity_id": "entity-human"}]
+
+        self.run_task(recent=recent, chain=chain)
+
+        sent = [turn["content"] for turn in self.llm.calls[0]["history"]]
+        self.assertEqual(sent, ["the original ask", "most recent"])
 
     def test_an_unknown_bot_is_a_no_op(self):
         answer_trigger("no-such-bot", self.trigger().to_payload())

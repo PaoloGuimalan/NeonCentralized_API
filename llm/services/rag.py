@@ -383,6 +383,7 @@ class CustomerServiceRAG:
         user_openai_key,
         top_k=5,
         agent=None,
+        include_history=True,
     ):
         """Context for one question: recent turns, plus whatever else is relevant.
 
@@ -390,7 +391,11 @@ class CustomerServiceRAG:
         to see everything - it means the caller could not say who is asking,
         and only the shared corpus answers.
         """
-        history = self.get_history(conversationID, 4)
+        # `include_history=False` is for a caller with a BETTER transcript than
+        # this one. The chatterloop bots have it: they read the conversation
+        # from chatterloop, reply chain walked, where this reads four rows of
+        # Neon's mirror - which holds only what a bot already answered.
+        history = self.get_history(conversationID, 4) if include_history else []
 
         try:
             query_vec = self.get_embedding(query, user_openai_key)
