@@ -62,6 +62,22 @@ HOUR_SECONDS = 3600
 # and the one event that should hand back a full budget.
 BOT_TURN_BUDGET = 40
 
+# How many replies one bot will send into one conversation per hour, counting
+# only replies to PEOPLE - bot-to-bot turns are bounded by BOT_TURN_BUDGET
+# instead, and counting them here is what previously let a collaboration spend
+# the allowance meant for answering somebody.
+#
+# This was 30, which is a plausible-looking number and too low for the thing it
+# guards. It is per conversation, so the way it failed was a bot going quiet in
+# ONE thread while answering normally in every other - which reads like being
+# ignored rather than like a limit, and there is nothing in the product that
+# says otherwise.
+#
+# 100 is still a flood guard: a person sending more than a hundred messages an
+# hour into a single conversation is a runaway loop or an integration mistake,
+# not somebody talking.
+MAX_REPLIES_PER_HOUR = 100
+
 
 class Verdict(StrEnum):
     RESPOND = "respond"
@@ -157,9 +173,10 @@ class InMemoryPolicyStore:
         self._reply_times[scope] = kept
         return len(kept)
 
-    def record_reply(self, scope, now):
+    def record_reply(self, scope, now, counts_toward_cap=True):
         self._last_reply_at[scope] = now
-        self._reply_times.setdefault(scope, []).append(now)
+        if counts_toward_cap:
+            self._reply_times.setdefault(scope, []).append(now)
 
     def bot_turns(self, scope):
         return self._bot_turns.get(scope, 0)
@@ -223,8 +240,11 @@ class RedisPolicyStore:
     def reset_bot_turns(self, scope):
         self.client.delete(f"{self.prefix}:botturns:{scope}")
 
-    def record_reply(self, scope, now):
+    def record_reply(self, scope, now, counts_toward_cap=True):
+        # Always: the cooldown paces every reply, whoever it was for.
         self.client.set(f"{self.prefix}:lastreply:{scope}", now, ex=HOUR_SECONDS)
+        if not counts_toward_cap:
+            return
         key = f"{self.prefix}:replies:{scope}"
         # Scored AND membered by the timestamp: two replies in the same
         # microsecond would collapse, which is a rounding error in a cap of 30
@@ -270,7 +290,7 @@ class AddressedOnlyPolicy:
         identity,
         store=None,
         cooldown_seconds=2.0,
-        max_replies_per_hour=30,
+        max_replies_per_hour=MAX_REPLIES_PER_HOUR,
         ignore_entity_ids=frozenset(),
         is_bot_author=None,
         allow_bot_conversations=False,
@@ -429,10 +449,25 @@ class AddressedOnlyPolicy:
         spends a turn; answering a PERSON hands the budget back, because
         somebody asking for something new is the clearest available signal
         that the previous collaboration is over.
-        """
-        self.store.record_reply(trigger.scope, time.time() if now is None else now)
 
-        if self.is_bot_author and self.is_bot_author(trigger.author_entity_id):
+        THE TWO BUDGETS DO NOT SHARE A PURSE
+        ------------------------------------
+        A bot-to-bot turn does NOT count toward the hourly cap. It used to,
+        and the effect was that two bots collaborating spent the allowance
+        meant for answering PEOPLE: thirty turns of them talking to each
+        other, and the next thing a person said went unanswered with "hourly
+        reply limit reached". The collaboration already has its own ceiling -
+        the turn budget - so counting it twice only bought a way for the
+        feature to break the thing it was built alongside.
+        """
+        now = time.time() if now is None else now
+        from_bot = bool(
+            self.is_bot_author and self.is_bot_author(trigger.author_entity_id)
+        )
+
+        self.store.record_reply(trigger.scope, now, counts_toward_cap=not from_bot)
+
+        if from_bot:
             self.store.record_bot_turn(trigger.scope)
         else:
             self.store.reset_bot_turns(trigger.scope)

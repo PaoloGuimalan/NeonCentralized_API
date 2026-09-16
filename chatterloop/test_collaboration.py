@@ -465,3 +465,49 @@ class TogglingOffAndOnTests(SimpleTestCase):
         p = policy(allow=False)
         missed = trigger(author=HUMAN, n=1)
         self.assertTrue(self._judge(p, missed).should_respond)
+
+
+class CapIsolationTests(SimpleTestCase):
+    """A collaboration must not spend the allowance for answering people.
+
+    The hourly cap is per CONVERSATION, so the symptom of getting this wrong is
+    a bot that has gone silent in one thread while answering normally in every
+    other one - which reads like the bot ignoring you rather than like a limit.
+    """
+
+    def test_bot_turns_do_not_consume_the_hourly_cap(self):
+        p = policy(allow=True, max_replies_per_hour=5)
+        now = time.time()
+        for i in range(20):
+            p.record_reply(trigger(n=i), now=now + i * 10)
+
+        decision = p.evaluate(trigger(author=HUMAN, n=99), now=now + 300)
+
+        self.assertTrue(
+            decision.should_respond,
+            "twenty bot turns left no room for a person to be answered",
+        )
+
+    def test_a_persons_replies_still_do(self):
+        """The cap has to keep working for what it is actually for."""
+        p = policy(allow=True, max_replies_per_hour=5)
+        now = time.time()
+        for i in range(5):
+            p.record_reply(trigger(author=HUMAN, n=i), now=now + i * 10)
+
+        decision = p.evaluate(trigger(author=HUMAN, n=99), now=now + 300)
+
+        self.assertIs(decision.verdict, Verdict.IGNORE)
+        self.assertIn("hourly reply limit", decision.reason)
+
+    def test_a_bot_turn_still_paces_the_next_reply(self):
+        """Excluded from the CAP, not from the cooldown - the pacing is what
+        keeps the exchange readable."""
+        p = policy(allow=True)
+        now = time.time()
+        p.record_reply(trigger(n=1), now=now)
+
+        decision = p.evaluate(trigger(n=2), now=now + 0.5)
+
+        self.assertTrue(decision.should_respond)
+        self.assertGreater(decision.delay, 0)
