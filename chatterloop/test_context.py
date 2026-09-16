@@ -7,7 +7,15 @@ the fetching - the reads are one API call each and fail independently.
 
 from django.test import SimpleTestCase
 
-from chatterloop.context import CHAIN_LIMIT, RECENT_LIMIT, build, merge
+from chatterloop.context import (
+    CHAIN_LIMIT,
+    QUOTE_LIMIT,
+    RECENT_LIMIT,
+    build,
+    merge,
+    parent_of,
+    question_for,
+)
 from chatterloop.runtime import BotIdentity
 
 BOT = "entity-bot"
@@ -115,3 +123,78 @@ class BuildTests(SimpleTestCase):
 
     def test_nothing_at_all_is_not_an_error(self):
         self.assertEqual(build([], []), [])
+
+
+class QuestionTests(SimpleTestCase):
+    """Telling the model WHICH message is being answered.
+
+    The lineage says what the thread is about. It does not say where in the
+    thread the reply points, and a reply to something far back arrives as a
+    flat transcript plus a pronoun - so the model resolves the pronoun against
+    the most recent turn, which is the one thing it is not about.
+    """
+
+    def _chain(self):
+        return [
+            {"message_id": "p", "content": "Here is a table of holidays.",
+             "sender_handle": "neon", "created_at": 100},
+            {"message_id": "a", "content": "Can you explain what you did here?",
+             "sender_handle": "paulo", "created_at": 900},
+        ]
+
+    def test_a_reply_to_something_far_back_quotes_it(self):
+        question = question_for(
+            "Can you explain what you did here?", self._chain(), "a",
+            [{"content": "an unrelated later message"}],
+        )
+
+        self.assertIn('Replying to @neon: "Here is a table of holidays."', question)
+        self.assertTrue(question.endswith("Can you explain what you did here?"))
+
+    def test_a_reply_to_the_last_thing_said_is_left_alone(self):
+        """The common case. Quoting it would change every prompt to solve a
+        problem that only appears when a reply points elsewhere."""
+        question = question_for(
+            "Can you explain what you did here?", self._chain(), "a",
+            [{"content": "Here is a table of holidays."}],
+        )
+
+        self.assertEqual(question, "Can you explain what you did here?")
+
+    def test_a_message_that_replies_to_nothing_is_left_alone(self):
+        chain = [{"message_id": "a", "content": "hello", "sender_handle": "paulo"}]
+
+        self.assertEqual(question_for("hello", chain, "a", []), "hello")
+
+    def test_no_chain_at_all_is_left_alone(self):
+        self.assertEqual(question_for("hello", [], None, []), "hello")
+
+    def test_a_long_parent_is_truncated_rather_than_becoming_the_prompt(self):
+        chain = self._chain()
+        chain[0]["content"] = "x" * (QUOTE_LIMIT * 3)
+
+        question = question_for("why?", chain, "a", [{"content": "other"}])
+
+        self.assertLess(len(question), QUOTE_LIMIT + 120)
+        self.assertIn("...", question)
+
+    def test_a_parent_with_no_handle_still_reads(self):
+        chain = self._chain()
+        chain[0]["sender_handle"] = ""
+
+        self.assertIn("Replying to them:", question_for("why?", chain, "a", [{"content": "x"}]))
+
+    def test_an_empty_parent_is_not_quoted(self):
+        chain = self._chain()
+        chain[0]["content"] = "   "
+
+        self.assertEqual(question_for("why?", chain, "a", [{"content": "x"}]), "why?")
+
+    def test_parent_of_locates_by_id_not_position(self):
+        chain = self._chain()
+        chain.append({"message_id": "later", "content": "after", "created_at": 999})
+
+        self.assertEqual(parent_of(chain, "a")["message_id"], "p")
+
+    def test_parent_of_an_unknown_message_is_none(self):
+        self.assertIsNone(parent_of(self._chain(), "nope"))

@@ -46,7 +46,7 @@ from .client import (
 from .models import ChatterloopBot
 from .ownership import conversation_owner
 from .authors import is_bot_entity
-from .context import CHAIN_LIMIT, RECENT_LIMIT, build
+from .context import CHAIN_LIMIT, RECENT_LIMIT, build, question_for
 from .policy import AddressedOnlyPolicy, build_store
 from .runtime import BotIdentity
 from .triggers import Trigger, TriggerSource
@@ -200,9 +200,8 @@ def answer_trigger(bot_id, payload):
     # Retrieval first, conversation second, so the transcript is what the model
     # reads last and answers from.
     try:
-        context = _retrieve(bot, conversation, trigger) + _conversation_context(
-            bot, token_value, trigger
-        )
+        turns, question = _conversation_context(bot, token_value, trigger)
+        context = _retrieve(bot, conversation, trigger) + turns
     except TokenRejected as ex:
         # Handled HERE rather than swallowed in the reader. The token is dead,
         # so the send a few lines down would fail too - returning now says so
@@ -232,7 +231,7 @@ def answer_trigger(bot_id, payload):
         reply = "".join(
             token
             for token in llm.stream_chat_completion(
-                context, bot.agent.role.system_prompt, trigger.query, tools
+                context, bot.agent.role.system_prompt, question, tools
             )
             if token is not None
         ).strip()
@@ -302,7 +301,7 @@ def _conversation_context(bot, token, trigger):
     """
     if not trigger.conversation_id:
         # A comment. Threading there is a different shape and a different route.
-        return []
+        return [], trigger.query
 
     recent, chain = [], []
 
@@ -335,14 +334,22 @@ def _conversation_context(bot, token, trigger):
 
     identity = BotIdentity(bot.entity_id, bot.verified_handle or bot.handle)
     turns = build(recent, chain, trigger.message_id, identity=identity)
+
+    # The lineage says what the thread is about; this says which message in it
+    # is being answered. Without it a reply to something far back arrives as a
+    # transcript plus a pronoun, and the model resolves the pronoun against the
+    # most recent turn.
+    question = question_for(trigger.query, chain, trigger.message_id, turns)
+
     logger.info(
-        "bot %s: %s turn(s) of context (%s recent, %s in thread)",
+        "bot %s: %s turn(s) of context (%s recent, %s in thread)%s",
         bot.handle,
         len(turns),
         len(recent),
         len(chain),
+        "; quoting the replied-to message" if question != trigger.query else "",
     )
-    return turns
+    return turns, question
 
 
 def _retrieve(bot, conversation, trigger):

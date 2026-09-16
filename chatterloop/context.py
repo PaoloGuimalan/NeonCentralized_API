@@ -86,3 +86,69 @@ def build(recent, chain, trigger_message_id=None, identity=None,
         is_self = bool(identity and identity.is_self(message.get("sender_entity_id")))
         turns.append({"role": "assistant" if is_self else "user", "content": content})
     return turns
+
+
+# How much of the replied-to message to quote back. Long enough to identify it,
+# short enough that quoting a wall of text does not become the prompt.
+QUOTE_LIMIT = 400
+
+
+def parent_of(chain, message_id):
+    """The message `message_id` is a reply to, from its own lineage.
+
+    The chain comes back oldest first and ENDS with the anchor, so the parent
+    is the element before it. Located by id rather than by taking `chain[-2]`,
+    because an assumption about position is the kind that holds until the day
+    something is filtered out of the middle.
+    """
+    ids = [str(m.get("message_id") or "") for m in chain]
+    try:
+        index = ids.index(str(message_id or ""))
+    except ValueError:
+        return None
+    return chain[index - 1] if index > 0 else None
+
+
+def question_for(query, chain, message_id, turns=None):
+    """The question, with the replied-to message quoted when it is not obvious.
+
+    WHY THIS EXISTS
+    ---------------
+    Handing the model the lineage is not the same as telling it WHICH message
+    is being answered. "Can you explain what you did here?" replying to
+    something thirteen turns back arrives as a flat transcript plus the word
+    "here", and the model resolves it against the nearest thing - the most
+    recent turn, which is not what was pointed at.
+
+    A person replying sees the parent quoted above their own message. This is
+    the same thing, said to the model.
+
+    ONLY WHEN IT IS NOT ALREADY OBVIOUS
+    -----------------------------------
+    Replying to the last thing said is the common case and needs no quote - the
+    parent is already the final turn the model read. Quoting it anyway would
+    change every prompt to solve a problem that only appears when a reply
+    points somewhere else.
+
+    ONCE, ON THE QUESTION
+    ---------------------
+    Deliberately not a per-turn prefix. Prefixing every turn with "History:"
+    taught the model to copy it, and replies went out starting with the word.
+    One quote on the final question is a shape it has no reason to imitate.
+    """
+    parent = parent_of(chain, message_id)
+    if parent is None:
+        return query
+
+    content = (parent.get("content") or "").strip()
+    if not content:
+        return query
+
+    if turns and (turns[-1].get("content") or "").strip() == content:
+        return query
+
+    handle = (parent.get("sender_handle") or "").strip()
+    who = f"@{handle}" if handle else "them"
+    if len(content) > QUOTE_LIMIT:
+        content = content[:QUOTE_LIMIT].rstrip() + "..."
+    return f'Replying to {who}: "{content}"\n\n{query}'
