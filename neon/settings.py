@@ -127,16 +127,22 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
-    "whitenoise.middleware.WhiteNoiseMiddleware",
+    # SecurityMiddleware first, then WhiteNoise DIRECTLY after it - the order
+    # WhiteNoise's own documentation asks for, so static responses carry the
+    # security headers rather than bypassing them.
     "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
+    # CORS has to run before anything that can generate a response, or a
+    # preflight answered by CommonMiddleware goes out with no CORS headers on
+    # it. It was below CommonMiddleware, which is the documented wrong place.
+    "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
+    # Listed once. It was in here twice, so every request ran it twice.
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "corsheaders.middleware.CorsMiddleware",
-    "django.middleware.common.CommonMiddleware",
 ]
 
 RAG = {
@@ -284,8 +290,40 @@ USE_TZ = True
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
+#
+# WHY THE ADMIN HAD NO STYLING
+# ----------------------------
+# There was a STATIC_URL and a WhiteNoise middleware and nothing else: no
+# STATIC_ROOT for `collectstatic` to write into, and no `collectstatic` step in
+# the image. So the admin rendered its HTML perfectly and every stylesheet it
+# asked for came back 404 - and because DEBUG is False, Django's development
+# static handler was not there to paper over it either.
+#
+# The three pieces have to agree: somewhere to collect TO, something that
+# collects, and something that serves. STATIC_ROOT and the storage below are
+# the first and third; the Dockerfile runs the second.
 
 STATIC_URL = "static/"
+
+# Where `collectstatic` gathers everything WhiteNoise then serves. Inside the
+# project directory rather than /var/..., so the same path works in the image,
+# in a container and on a laptop.
+STATIC_ROOT = BASE_DIR / "staticfiles"
+
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        # Compressed but NOT hashed. The manifest variant is the usual
+        # production recommendation and gives far-future caching, but it turns
+        # a missing `collectstatic` into a 500 on every page that renders a
+        # `{% static %}` tag rather than an unstyled one - and DEBUG is False
+        # here even in local development, so that failure would be one command
+        # away at all times. The admin is not worth that trade.
+        "BACKEND": "whitenoise.storage.CompressedStaticFilesStorage",
+    },
+}
 
 REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": [

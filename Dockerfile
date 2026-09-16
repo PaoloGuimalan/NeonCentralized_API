@@ -43,7 +43,18 @@ COPY . .
 # pull the image could read - and mounting a secret over the top does not
 # remove the copy underneath. .dockerignore keeps them out of `COPY . .`.
 
-# Security: Create and use a non-root user
+# Gather the admin's CSS and JS into STATIC_ROOT for WhiteNoise to serve.
+# Without this the admin renders unstyled in production: every stylesheet it
+# asks for 404s, and DEBUG=False means Django's development static handler is
+# not there to cover for it.
+#
+# SECRET_KEY is supplied inline because settings reads it at import and the
+# image deliberately carries no .env - collectstatic touches no database and
+# no real secret, so a build-time placeholder is all it needs.
+RUN SECRET_KEY=build-time-collectstatic python manage.py collectstatic --noinput --clear
+
+# Security: Create and use a non-root user. AFTER collectstatic, so the
+# generated staticfiles/ is owned by the user that serves it.
 RUN useradd -m django_user && chown -R django_user /app
 USER django_user
 
