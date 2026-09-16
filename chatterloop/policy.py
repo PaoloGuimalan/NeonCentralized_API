@@ -328,16 +328,19 @@ class AddressedOnlyPolicy:
 
         # 5. A bot talking to a bot, where that was not asked for.
         #
-        #    TRANSIENT, because a toggle is exactly the kind of refusal that
-        #    stops applying: somebody switching it on wants the conversation in
-        #    front of them to continue, not to have to retype the message that
-        #    was refused while it was off.
+        #    TERMINAL. This was briefly transient, on the reasoning that a
+        #    toggle is the kind of refusal that stops applying - switch it on
+        #    and the conversation in front of you continues rather than needing
+        #    to be retyped into.
+        #
+        #    That is wrong, and switching the toggle off and on again is what
+        #    shows it. Everything refused while off is still unhandled, so the
+        #    next frame re-offers the lot and the bot works through a backlog of
+        #    stale messages instead of waiting to be addressed again. Off has to
+        #    mean the bot was NOT LISTENING - and something said while it was
+        #    not listening is finished with, not deferred.
         if from_bot and not self.allow_bot_conversations:
-            return Decision(
-                Verdict.IGNORE,
-                "bot-to-bot replies are off for this bot",
-                transient=True,
-            )
+            return Decision(Verdict.IGNORE, "bot-to-bot replies are off for this bot")
 
         # 6. The collaboration budget, which replaces the hourly cap while two
         #    bots are working. Terminal on purpose - the point of a ceiling is

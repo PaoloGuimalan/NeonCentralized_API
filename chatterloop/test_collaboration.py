@@ -68,15 +68,17 @@ class ToggleTests(SimpleTestCase):
         self.assertIs(decision.verdict, Verdict.IGNORE)
         self.assertIn("off for this bot", decision.reason)
 
-    def test_off_is_retryable_because_a_toggle_can_be_flipped(self):
-        """The opposite of what this asserted at first.
+    def test_off_is_terminal_so_switching_on_does_not_replay_a_backlog(self):
+        """Off means the bot was NOT LISTENING.
 
-        A toggle is exactly the kind of refusal that stops applying. Recording
-        it as handled meant that switching bot chat ON left every message
-        refused while it was off permanently unanswerable, so the conversation
-        in front of you stayed dead and you had to retype into it.
+        This was transient for one revision, so that switching the toggle on
+        would continue the conversation in front of you rather than needing it
+        retyped. Toggling off and on again is what showed that to be wrong:
+        everything refused while off was still unhandled, so the next frame
+        re-offered the lot and the bot answered its way through stale messages
+        instead of waiting to be addressed again.
         """
-        self.assertTrue(policy(allow=False).evaluate(trigger()).transient)
+        self.assertFalse(policy(allow=False).evaluate(trigger()).transient)
 
     def test_on_means_a_bot_is_answered(self):
         self.assertTrue(policy(allow=True).evaluate(trigger()).should_respond)
@@ -401,8 +403,65 @@ class LiveReconfigurationTests(SimpleTestCase):
         self.assertIs(worker.runtime.policy, before)
         self.assertTrue(worker.runtime.policy.allow_bot_conversations)
 
-    def test_a_message_refused_while_off_is_not_burned(self):
-        """So switching the toggle on continues the conversation in front of
-        you, instead of needing the refused message retyped."""
+    def test_reconfiguring_does_not_reopen_what_was_already_refused(self):
+        """The flag changes; the record of what the bot already declined does
+        not. Otherwise a toggle becomes a replay button - see
+        TogglingOffAndOnTests."""
+        worker = self._worker(started_with=False)
+        p = worker.runtime.policy
+
+        missed = trigger(n=1)
+        p.evaluate(missed)
+        p.record_seen(missed.dedupe_key)
+
+        worker.refresh(self._Bot(allow=True))
+
+        self.assertTrue(p.has_seen(missed.dedupe_key))
+        self.assertTrue(p.evaluate(trigger(n=2)).should_respond)
+
+
+class TogglingOffAndOnTests(SimpleTestCase):
+    """Switching bot chat off and on again must not replay what it missed.
+
+    The bot should pick up from the next thing said to it, the way it would if
+    it had simply not been there - not work backwards through everything that
+    happened while it was off.
+    """
+
+    def _judge(self, p, t):
+        """One frame, exactly as runtime._decide handles it."""
+        decision = p.evaluate(t)
+        if not decision.transient:
+            p.record_seen(t.dedupe_key)
+        return decision
+
+    def test_messages_missed_while_off_are_not_answered_later(self):
         p = policy(allow=False)
-        self.assertTrue(p.evaluate(trigger()).transient)
+
+        missed = [trigger(n=i) for i in range(1, 4)]
+        for t in missed:
+            self.assertFalse(self._judge(p, t).should_respond)
+
+        # The user ticks the box again.
+        p.allow_bot_conversations = True
+
+        for t in missed:
+            self.assertTrue(
+                p.has_seen(t.dedupe_key),
+                f"{t.dedupe_key} would be offered again and answered stale",
+            )
+
+    def test_the_next_new_message_is_answered(self):
+        """Off is not a mute that outlives itself - it stops at the next thing
+        actually said."""
+        p = policy(allow=False)
+        self._judge(p, trigger(n=1))
+
+        p.allow_bot_conversations = True
+
+        self.assertTrue(self._judge(p, trigger(n=2)).should_respond)
+
+    def test_a_person_is_unaffected_by_any_of_this(self):
+        p = policy(allow=False)
+        missed = trigger(author=HUMAN, n=1)
+        self.assertTrue(self._judge(p, missed).should_respond)
