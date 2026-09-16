@@ -217,6 +217,12 @@ class ChatterloopBot(models.Model):
     # itself still ends. Both bots need it on: each one checks its own flag, so
     # one bot with it off is enough to stop the exchange - which is also how
     # you stop one that is running.
+    #
+    # Changing this on a bot that is ALREADY ONLINE works: the supervisor's
+    # sweep reconfigures the live policy (BotWorker.refresh). It did not at
+    # first, and the failure was silent in the worst way - the database said
+    # on, the running bot behaved as off, and the natural order to do things
+    # in (switch the bot on, then tick the box) was the one that broke.
     allow_bot_conversations = models.BooleanField(
         default=False,
         help_text=(

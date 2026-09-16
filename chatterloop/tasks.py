@@ -286,7 +286,13 @@ def _retrieve(bot, conversation, trigger):
     return [
         {
             "role": "user" if row["msg_type"] == "text" else "assistant",
-            "content": f'History: {row["text"]}',
+            # NOT prefixed with anything. This used to read `f"History: {...}"`,
+            # which put the literal word on the front of every assistant turn -
+            # and a model shown a dozen of its own turns starting "History: "
+            # copies the pattern, so real replies went out beginning with it.
+            # The `role` already says whose turn this was; the label added
+            # nothing and cost the answer its first two words.
+            "content": row["text"],
         }
         for row in retrieved
     ]

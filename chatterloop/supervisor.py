@@ -108,6 +108,35 @@ class BotWorker:
             return
         answer_trigger.delay(self.bot_id, trigger.to_payload())
 
+    def refresh(self, bot):
+        """Pick up settings changed while this bot was already running.
+
+        The policy is built once, in `__init__`, from the row as it looked when
+        the lease was won. Everything else about a bot is start/stop - online,
+        deactivated, token revoked - so that was fine until a setting appeared
+        that can change WITHOUT the bot stopping.
+
+        `allow_bot_conversations` is that setting, and it is the obvious one to
+        turn on for a bot that is already online. Doing so had no effect at all:
+        the running worker kept refusing bot-authored triggers from the stale
+        flag it captured at start, and nothing anywhere said the database and
+        the running bot disagreed.
+
+        Mutated in place rather than by restarting the worker, because a
+        restart means dropping and reopening the SSE connection - and frames
+        published while it is down are gone, developer_service having no
+        replay.
+        """
+        wanted = bool(bot.allow_bot_conversations)
+        if self.runtime.policy.allow_bot_conversations == wanted:
+            return
+        self.runtime.policy.allow_bot_conversations = wanted
+        logger.info(
+            "bot @%s: talking to other bots is now %s",
+            self.handle,
+            "on" if wanted else "off",
+        )
+
     def start(self):
         self._tasks = [
             asyncio.create_task(self._read(), name=f"read:{self.handle}"),
@@ -322,6 +351,10 @@ class Supervisor:
                 if worker.fatal:
                     self._refused[bot_id] = worker.fatal
                     await self._drop(bot_id, release=True)
+                    continue
+                # The sweep already holds a fresh row, so this is where a
+                # setting changed on a RUNNING bot gets picked up.
+                worker.refresh(bot)
                 continue
 
             try:

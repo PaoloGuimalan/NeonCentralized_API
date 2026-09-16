@@ -262,8 +262,14 @@ class BotDetailView(BotViewMixin, OrganizationScopedView):
         if "description" in data:
             bot.description = data["description"]
 
-        # Read by the supervisor when it builds this bot's policy, so it takes
-        # effect on the next sweep rather than needing anything restarted.
+        # Applied to a RUNNING bot by the sweep, which re-reads the row and
+        # reconfigures the live policy - see BotWorker.refresh. Without that,
+        # ticking this on a bot that was already online did nothing at all, and
+        # the most natural order to do things in was the broken one.
+        bot_chat_changed = (
+            "allow_bot_conversations" in data
+            and bot.allow_bot_conversations != data["allow_bot_conversations"]
+        )
         if "allow_bot_conversations" in data:
             bot.allow_bot_conversations = data["allow_bot_conversations"]
 
@@ -278,6 +284,11 @@ class BotDetailView(BotViewMixin, OrganizationScopedView):
                 "updated_at",
             ]
         )
+
+        if bot_chat_changed:
+            # Best effort, exactly like the online switch: the sweep converges
+            # within its interval regardless, this only makes it immediate.
+            announce(str(bot.pk), "settings")
         return ok(ChatterloopBotSerializer(bot, context=self._context([bot])).data)
 
     def delete(self, request, bot_id):

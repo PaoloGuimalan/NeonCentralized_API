@@ -300,7 +300,7 @@ class MessagingView(APIView):
                 history.append(
                     {
                         "role": ("user" if msg["msg_type"] == "text" else "assistant"),
-                        "content": f'History: {msg["text"]}',
+                        "content": msg["text"],
                     }
                 )
 
@@ -646,7 +646,7 @@ class ExternalChatView(APIView):
             history = [
                 {
                     "role": ("user" if msg["msg_type"] == "text" else "assistant"),
-                    "content": f'History: {msg["text"]}',
+                    "content": msg["text"],
                 }
                 for msg in history_query
             ]

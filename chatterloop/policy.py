@@ -269,7 +269,7 @@ class AddressedOnlyPolicy:
         self,
         identity,
         store=None,
-        cooldown_seconds=5.0,
+        cooldown_seconds=2.0,
         max_replies_per_hour=30,
         ignore_entity_ids=frozenset(),
         is_bot_author=None,
@@ -326,10 +326,18 @@ class AddressedOnlyPolicy:
             self.is_bot_author and self.is_bot_author(trigger.author_entity_id)
         )
 
-        # 5. A bot talking to a bot, where that was not asked for. Terminal:
-        #    the toggle is off, and nothing about waiting changes that.
+        # 5. A bot talking to a bot, where that was not asked for.
+        #
+        #    TRANSIENT, because a toggle is exactly the kind of refusal that
+        #    stops applying: somebody switching it on wants the conversation in
+        #    front of them to continue, not to have to retype the message that
+        #    was refused while it was off.
         if from_bot and not self.allow_bot_conversations:
-            return Decision(Verdict.IGNORE, "bot-to-bot replies are off for this bot")
+            return Decision(
+                Verdict.IGNORE,
+                "bot-to-bot replies are off for this bot",
+                transient=True,
+            )
 
         # 6. The collaboration budget, which replaces the hourly cap while two
         #    bots are working. Terminal on purpose - the point of a ceiling is

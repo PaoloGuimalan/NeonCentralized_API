@@ -68,10 +68,15 @@ class ToggleTests(SimpleTestCase):
         self.assertIs(decision.verdict, Verdict.IGNORE)
         self.assertIn("off for this bot", decision.reason)
 
-    def test_off_is_terminal_so_the_message_is_not_reconsidered(self):
-        """Nothing about waiting changes a toggle. Leaving it retryable would
-        re-offer the same message on every later frame, forever."""
-        self.assertFalse(policy(allow=False).evaluate(trigger()).transient)
+    def test_off_is_retryable_because_a_toggle_can_be_flipped(self):
+        """The opposite of what this asserted at first.
+
+        A toggle is exactly the kind of refusal that stops applying. Recording
+        it as handled meant that switching bot chat ON left every message
+        refused while it was off permanently unanswerable, so the conversation
+        in front of you stayed dead and you had to retype into it.
+        """
+        self.assertTrue(policy(allow=False).evaluate(trigger()).transient)
 
     def test_on_means_a_bot_is_answered(self):
         self.assertTrue(policy(allow=True).evaluate(trigger()).should_respond)
@@ -100,17 +105,18 @@ class CooldownTests(SimpleTestCase):
         now = time.time()
         p.record_reply(trigger(n=1), now=now)
 
-        decision = p.evaluate(trigger(n=2), now=now + 1.0)
+        decision = p.evaluate(trigger(n=2), now=now + 0.5)
 
         self.assertTrue(decision.should_respond)
-        self.assertAlmostEqual(decision.delay, 4.0, places=1)
+        # The 2s cooldown, minus what has already elapsed.
+        self.assertAlmostEqual(decision.delay, 1.5, places=1)
 
     def test_a_person_repeating_themselves_still_gets_one_answer(self):
         p = policy()
         now = time.time()
         p.record_reply(trigger(author=HUMAN, n=1), now=now)
 
-        decision = p.evaluate(trigger(author=HUMAN, n=2), now=now + 1.0)
+        decision = p.evaluate(trigger(author=HUMAN, n=2), now=now + 0.5)
 
         self.assertIs(decision.verdict, Verdict.IGNORE)
         self.assertIn("cooldown", decision.reason)
@@ -348,3 +354,55 @@ class ApiTests(TestCase):
         self.assertEqual(bot.model_id, self.model.pk)
         self.assertTrue(bot.is_online)
         self.assertEqual(bot.status, ChatterloopBot.STATUS_ACTIVE)
+
+
+class LiveReconfigurationTests(SimpleTestCase):
+    """Ticking the toggle on a bot that is already running has to work.
+
+    It did not, and nothing said so: the policy was built once when the lease
+    was won, so a bot switched online BEFORE the box was ticked kept refusing
+    other bots from the flag it captured at start. Since switching a bot on and
+    then configuring it is the obvious order, the obvious order was broken.
+    """
+
+    class _Bot:
+        def __init__(self, allow):
+            self.allow_bot_conversations = allow
+
+    def _worker(self, started_with):
+        """A BotWorker's policy, without the SSE connection it normally owns."""
+        from chatterloop.supervisor import BotWorker
+
+        worker = BotWorker.__new__(BotWorker)
+        worker.handle = "xenon"
+        worker.runtime = type(
+            "R", (), {"policy": policy(allow=started_with)}
+        )()
+        return worker
+
+    def test_switching_it_on_reaches_a_running_bot(self):
+        worker = self._worker(started_with=False)
+        self.assertFalse(worker.runtime.policy.evaluate(trigger()).should_respond)
+
+        worker.refresh(self._Bot(allow=True))
+
+        self.assertTrue(worker.runtime.policy.evaluate(trigger()).should_respond)
+
+    def test_switching_it_off_reaches_a_running_bot(self):
+        """How a collaboration in progress is stopped."""
+        worker = self._worker(started_with=True)
+        worker.refresh(self._Bot(allow=False))
+        self.assertFalse(worker.runtime.policy.evaluate(trigger()).should_respond)
+
+    def test_refreshing_with_no_change_is_a_no_op(self):
+        worker = self._worker(started_with=True)
+        before = worker.runtime.policy
+        worker.refresh(self._Bot(allow=True))
+        self.assertIs(worker.runtime.policy, before)
+        self.assertTrue(worker.runtime.policy.allow_bot_conversations)
+
+    def test_a_message_refused_while_off_is_not_burned(self):
+        """So switching the toggle on continues the conversation in front of
+        you, instead of needing the refused message retyped."""
+        p = policy(allow=False)
+        self.assertTrue(p.evaluate(trigger()).transient)
