@@ -242,6 +242,22 @@ class ChatterloopBot(models.Model):
     verified_handle = models.CharField(max_length=50, blank=True, default="")
     last_verified_at = models.DateTimeField(null=True, blank=True)
 
+    # The key the CONTROL ENDPOINT accepts - see chatterloop/presence.py.
+    #
+    # WHY A KEY AND NOT A SESSION. That endpoint is driven by things that hold
+    # no Neon session: chatterloop's own /wake, a cron job, a deploy script,
+    # somebody with curl. The key scopes authority to one bot and one power -
+    # whether a supervisor holds its stream - so losing it costs a bot that
+    # can be woken and slept, not an account.
+    #
+    # DISTINCT FROM A TOKEN SECRET, which can send messages as the bot and is
+    # therefore stored as a hash and shown once. This one is readable back,
+    # because a control key nobody can look up again is one people paste into
+    # a second place and then cannot verify.
+    #
+    # Encrypted at rest with the same Fernet key as the token secret.
+    control_key_encrypted = models.TextField(blank=True, default="")
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -39,6 +39,13 @@ class TriggerReason(StrEnum):
     conversation the bot is one of exactly two participants, so every message
     from the other one is addressed to it by construction.
 
+    COMMAND is an explicit invocation - somebody typed a `/name` the bot
+    declares. It needs no @handle and no reply-threading for the same reason a
+    mention needs neither in a DM: typing the command IS the address. It is
+    checked first, because a command is the most specific thing a message can
+    be, and reading it as an ordinary mention would send the arguments to the
+    model as though they were a question.
+
     Deliberately NOT a value for "replied to somebody else in a group thread
     the bot is in". That is ordinary conversation between other people.
     """
@@ -46,6 +53,7 @@ class TriggerReason(StrEnum):
     MENTION = "mention"
     REPLY = "reply"
     DM = "dm"
+    COMMAND = "command"
 
 
 @dataclass(slots=True)
@@ -72,6 +80,12 @@ class Trigger:
     # `text` with the bot's own @handle removed - what actually gets embedded.
     query: str = ""
 
+    # COMMAND only: which command was typed, and whether it named a bot. Kept
+    # on the trigger rather than re-derived from `text`, because the server
+    # already parsed it - see frames.TypedCommand.
+    command_name: str = ""
+    command_target: str = ""
+
     realm_name: str = ""
     is_single: bool = False
     occurred_at: str = ""
@@ -87,7 +101,14 @@ class Trigger:
 
         A trigger with no text is something we know happened but cannot read.
         Answering one would mean generating a reply to an unknown question.
+
+        A COMMAND is judged on its TEXT rather than its query, because its
+        query is its arguments and "/summarize" with no arguments is a complete
+        instruction. Requiring a non-empty query here would silently drop every
+        command that takes none - which is most of them.
         """
+        if self.reason is TriggerReason.COMMAND:
+            return bool(self.text.strip())
         return bool(self.query.strip())
 
     @property

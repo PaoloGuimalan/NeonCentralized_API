@@ -34,6 +34,11 @@ urlpatterns = [
                     "chatterloop/",
                     include("chatterloop.urls", namespace="api-chatterloop"),
                 ),
+                # The PUBLIC bot API, deliberately not under /chatterloop/:
+                # a bot is a general integration, and the URL somebody copies
+                # into a cron job should not name the platform that happens to
+                # carry its messages. See chatterloop/bot_api_urls.py.
+                path("bots/", include("chatterloop.bot_api_urls", namespace="bots")),
                 path(
                     "organization/",
                     include("organization.urls", namespace="api-organization"),

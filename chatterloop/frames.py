@@ -86,6 +86,25 @@ class Mentioner:
 
 
 @dataclass(slots=True)
+class TypedCommand:
+    """A `/command` somebody typed, as the server parsed it.
+
+    ALREADY PARSED, DELIBERATELY. The grammar lives in chatterloop's
+    `commandParser.js` and is pinned there by a corpus of matches and
+    non-matches. Re-parsing the text here would make a second implementation of
+    that grammar, in a second language, that nothing compares against - and the
+    first time the two disagreed, a command would mean one thing to the server
+    and another to the bot.
+
+    `target` is the `:handle` suffix - "/summarize:neon" targets one bot where
+    "/summarize" addresses whichever can answer it. Empty when none was typed.
+    """
+
+    name: str = ""
+    target: str = ""
+
+
+@dataclass(slots=True)
 class MessagesListPayload:
     """Body of a `messages_list` frame.
 
@@ -99,6 +118,11 @@ class MessagesListPayload:
     # entity id for loop prevention.
     entity_id: str = ""
     mentioner: Mentioner | None = None
+    # Set when the message began with a command. chatterloop runs the `system`
+    # and `webhook` ones itself and never tells us; this field is how a `bot`
+    # one arrives, and is the whole mechanism for them - there is no queue, no
+    # delivery receipt and no second channel.
+    command: TypedCommand | None = None
     # Present instead of a normal delivery when a message was deleted.
     deleted_message_id: str = ""
 
@@ -152,9 +176,23 @@ def parse_messages_list(envelope):
             is_single=bool(raw_mentioner.get("isSingle")),
         )
 
+    raw_command = body.get("command")
+    command = None
+    if isinstance(raw_command, dict):
+        name = str(raw_command.get("name") or "").lower()
+        # A command with no name is not a command. Guarded rather than trusted:
+        # this is another service's field, and an empty name would otherwise
+        # match a bot's arsenal entry only by accident.
+        if name:
+            command = TypedCommand(
+                name=name,
+                target=str(raw_command.get("target") or "").lower(),
+            )
+
     return MessagesListPayload(
         conversation_id=str(body.get("conversationID") or ""),
         entity_id=str(body.get("entityID") or ""),
         mentioner=mentioner,
+        command=command,
         deleted_message_id=str(body.get("deletedMessageID") or ""),
     )

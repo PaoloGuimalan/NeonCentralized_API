@@ -42,6 +42,7 @@ from .client import ChatterloopAPIError, TokenRejected, stream_events
 from .control import listen
 from .leases import LeaseManager, RENEW_INTERVAL_SECONDS
 from .authors import is_bot_entity
+from .commands import arsenal_for, arsenals_for
 from .policy import AddressedOnlyPolicy, build_store
 from .runtime import BotIdentity, BotRuntime
 
@@ -84,6 +85,11 @@ class BotWorker:
             policy=policy,
             token=token,
             dispatch=self._dispatch,
+            # The bot's own `/command` names, read from chatterloop's
+            # bot_commands. Empty unless this bot declares some, which keeps a
+            # bot that has none exactly as mention-only as it was before
+            # commands existed - see chatterloop/commands.py.
+            commands=arsenal_for(bot),
             # Stamped when the LEASE is acquired, not at import: this is the
             # watermark that stops a restart working through a backlog, and it
             # has to mean "since this supervisor took responsibility for this
@@ -108,7 +114,7 @@ class BotWorker:
             return
         answer_trigger.delay(self.bot_id, trigger.to_payload())
 
-    def refresh(self, bot):
+    def refresh(self, bot, arsenal=None):
         """Pick up settings changed while this bot was already running.
 
         The policy is built once, in `__init__`, from the row as it looked when
@@ -128,14 +134,35 @@ class BotWorker:
         replay.
         """
         wanted = bool(bot.allow_bot_conversations)
-        if self.runtime.policy.allow_bot_conversations == wanted:
-            return
-        self.runtime.policy.allow_bot_conversations = wanted
-        logger.info(
-            "bot @%s: talking to other bots is now %s",
-            self.handle,
-            "on" if wanted else "off",
-        )
+        if self.runtime.policy.allow_bot_conversations != wanted:
+            self.runtime.policy.allow_bot_conversations = wanted
+            logger.info(
+                "bot @%s: talking to other bots is now %s",
+                self.handle,
+                "on" if wanted else "off",
+            )
+
+        # The arsenal, for the same reason and with the same failure if it is
+        # left out: a command added in developer_service would be offered by
+        # the composer's menu and listed by /help, and the running bot would
+        # ignore every use of it until something restarted the worker.
+        #
+        # PASSED IN by the sweep, which reads every bot's in one query. Reading
+        # it here would be one round trip per bot per sweep against another
+        # service's database - the cost `_candidates` prefetches to avoid.
+        # `None` means the caller did not batch, so fall back to a single read.
+        if arsenal is None:
+            arsenal = arsenal_for(bot)
+        if self.runtime.commands != arsenal:
+            added = sorted(arsenal - self.runtime.commands)
+            removed = sorted(self.runtime.commands - arsenal)
+            self.runtime.commands = arsenal
+            logger.info(
+                "bot @%s: arsenal changed (+%s -%s)",
+                self.handle,
+                ",".join(added) or "none",
+                ",".join(removed) or "none",
+            )
 
     def start(self):
         self._tasks = [
@@ -339,6 +366,14 @@ class Supervisor:
             logger.exception("could not list bots to run")
             return
 
+        # Every running bot's arsenal, in one query rather than one per bot.
+        # Read here because the sweep is the only place that holds the whole
+        # list at once.
+        running = [b for b in bots if str(b.pk) in self.workers]
+        arsenals = (
+            await asyncio.to_thread(arsenals_for, running) if running else {}
+        )
+
         seen = set()
         for bot in bots:
             bot_id = str(bot.pk)
@@ -354,7 +389,7 @@ class Supervisor:
                     continue
                 # The sweep already holds a fresh row, so this is where a
                 # setting changed on a RUNNING bot gets picked up.
-                worker.refresh(bot)
+                worker.refresh(bot, arsenals.get(bot.bot_id, frozenset()))
                 continue
 
             try:

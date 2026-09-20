@@ -40,6 +40,15 @@ CHATTERLOOP_API_BASE_URL = os.getenv(
     "CHATTERLOOP_API_BASE_URL", "https://api.chatterloop.app"
 ).rstrip("/")
 
+# Where ANOTHER SERVICE reaches Neon.
+#
+# Used to build the /wake and /sleep webhook urls written into chatterloop's
+# bot_commands. Those are called by chatterloop's worker_service, so the value
+# has to be the address that worker can resolve - not localhost, and not a
+# relative path. Left empty, the two commands are simply not provisioned and a
+# warning says so, rather than rows being written that point nowhere.
+NEON_PUBLIC_BASE_URL = os.getenv("NEON_PUBLIC_BASE_URL", "").rstrip("/")
+
 # developer_service - the API Neon's BOTS authenticate against, with the clt_
 # tokens minted in chatterloop/provisioning.py. A DIFFERENT service from
 # CHATTERLOOP_API_BASE_URL above, which is user_service and handles sign-in.

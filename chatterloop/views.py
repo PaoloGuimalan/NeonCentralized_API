@@ -12,16 +12,28 @@ that page's name.
 
 import logging
 
+from hmac import compare_digest
+
 from django.utils.timezone import now
+from rest_framework.permissions import AllowAny
+from rest_framework.views import APIView
 from rest_framework import status
 
 from core.models import ConnectedAccount
 from core.services.chatterloop_identity import may_act_as
 from llm.models import Agent, Model
 from neon.api import OrganizationScopedView, fail, ok
+from neon.utils.crypto import decrypt, encrypt
 
 from .client import ChatterloopAPIError, TokenRejected, whoami
 from .control import announce
+from .presence import (
+    WAKE,
+    control_path,
+    ensure_control_key,
+    generate_control_key,
+    resolve_action,
+)
 from .leases import running_bot_ids
 from .models import ChatterloopBot, ChatterloopToken
 from .provisioning import (
@@ -546,3 +558,155 @@ class HandleAvailabilityView(OrganizationScopedView):
                 "taken_by": conflict or "",
             }
         )
+
+class BotControlKeyView(BotViewMixin, OrganizationScopedView):
+    """Show, or rotate, the key that the control endpoint accepts.
+
+    A SESSION ROUTE, unlike the endpoint it issues keys for: deciding who may
+    hold a bot's control key is exactly the kind of thing a Neon session is
+    for, and it is scoped to the caller's organization like every other bot
+    route here.
+
+    GET returns the key. That is deliberate and not the same trade-off tokens
+    make - a `clt_` token can send messages as the bot, so Neon stores only a
+    hash and shows it once. This key does one thing, and a control key nobody
+    can look up again is one people paste into a second place and then cannot
+    verify.
+
+    POST rotates it, which instantly invalidates every copy - the remedy when
+    one leaks.
+    """
+
+    def get(self, request, bot_id):
+        bot = self._bots().filter(id=bot_id).first()
+        if bot is None:
+            return fail("Bot not found.", status.HTTP_404_NOT_FOUND)
+        return ok(self._payload(request, bot))
+
+    def post(self, request, bot_id):
+        bot = self._bots().filter(id=bot_id).first()
+        if bot is None:
+            return fail("Bot not found.", status.HTTP_404_NOT_FOUND)
+
+        bot.control_key_encrypted = encrypt(generate_control_key())
+        bot.save(update_fields=["control_key_encrypted", "updated_at"])
+        logger.info("bot @%s: control key rotated", bot.handle)
+        return ok(
+            self._payload(request, bot),
+            message="Key rotated. Every previous copy has stopped working.",
+        )
+
+    def _payload(self, request, bot):
+        return {
+            "bot": str(bot.pk),
+            "handle": bot.handle,
+            "url": request.build_absolute_uri(control_path(bot)),
+            "key": ensure_control_key(bot),
+            # Spelled out, because the point of this route is that somebody
+            # copies it into a tool that is not Neon.
+            "usage": {
+                "wake": "POST <url>?action=wake",
+                "sleep": "POST <url>?action=sleep",
+                "header": "Authorization: Bearer <key>",
+            },
+        }
+
+
+class BotControlView(APIView):
+    """Run or stop one bot, from anything that can make a request.
+
+    NOT AN ORGANIZATION-SCOPED VIEW, and deliberately so. Every other route in
+    this file is a person acting through a Neon session. This is a control
+    plane: chatterloop calls it for `/wake`, and so can a cron job, a deploy
+    script, or somebody with curl. It authenticates with the bot's own control
+    key, which scopes authority to one bot and one power.
+
+    A WRONG KEY GETS 404, NOT 401. Telling an unauthenticated caller that a
+    bot id exists is itself an answer, and this endpoint is meant to be
+    pasted into other people's configuration - so the id will travel.
+
+    IDEMPOTENT. Waking a bot that is awake is success, not an error: a caller
+    retrying after a timeout should not have to care which attempt landed.
+    """
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request, bot_id):
+        # The query string first, because that is the form somebody copies.
+        # A JSON body is accepted too, for callers that find it easier.
+        body = request.data if isinstance(request.data, dict) else {}
+        action = resolve_action(
+            request.query_params.get("action") or body.get("action")
+        )
+        if action is None:
+            return fail(
+                "Pass ?action=wake or ?action=sleep.",
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+        bot = self._authenticate(request, bot_id)
+        if bot is None:
+            return fail("Bot not found.", status.HTTP_404_NOT_FOUND)
+
+        online = action == WAKE
+        if bot.is_online == online:
+            return ok(
+                {"bot": str(bot.pk), "handle": bot.handle, "is_online": bot.is_online},
+                message=f"Already {'awake' if online else 'asleep'}.",
+            )
+
+        bot.is_online = online
+        bot.online_changed_at = now()
+        bot.save(
+            update_fields=["is_online", "online_changed_at", "updated_at"]
+        )
+
+        # The same nudge the dashboard toggle sends, so this takes effect now
+        # rather than at the supervisor's next sweep. Best effort: the sweep
+        # converges either way, which is why a failure is not reported as one.
+        announce(str(bot.pk), "online" if online else "offline")
+
+        logger.info("bot @%s: %s via the control endpoint", bot.handle, action)
+        return ok(
+            {"bot": str(bot.pk), "handle": bot.handle, "is_online": bot.is_online},
+            message=f"@{bot.handle} is now {'awake' if online else 'asleep'}.",
+        )
+
+    def _authenticate(self, request, bot_id):
+        """The bot this request may control, or None.
+
+        Every failure returns None and the caller answers 404 - a missing bot,
+        a missing key, an unreadable one and a wrong one are indistinguishable
+        from outside.
+        """
+        presented = _bearer(request)
+        if not presented:
+            return None
+
+        bot = ChatterloopBot.objects.filter(id=bot_id).first()
+        if bot is None:
+            return None
+
+        stored = (bot.control_key_encrypted or "").strip()
+        if not stored:
+            return None
+
+        try:
+            key = decrypt(stored)
+        except Exception:
+            logger.warning("bot @%s: the control key is unreadable", bot.handle)
+            return None
+
+        # Constant time: a timing difference here leaks the key a character at
+        # a time to anyone willing to measure.
+        return bot if compare_digest(presented, key) else None
+
+
+def _bearer(request):
+    """The presented key, from `Authorization: Bearer <key>`."""
+    header = request.META.get("HTTP_AUTHORIZATION", "")
+    parts = header.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return ""
+    return parts[1]

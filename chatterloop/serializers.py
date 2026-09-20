@@ -68,6 +68,8 @@ class ChatterloopBotSerializer(serializers.ModelSerializer):
     # that as simply "online" is how somebody spends an afternoon wondering
     # why their bot is ignoring them.
     running = serializers.SerializerMethodField()
+    control_url = serializers.SerializerMethodField()
+    control_key = serializers.SerializerMethodField()
 
     class Meta:
         model = ChatterloopBot
@@ -91,6 +93,8 @@ class ChatterloopBotSerializer(serializers.ModelSerializer):
             "allow_bot_conversations",
             "should_run",
             "running",
+            "control_url",
+            "control_key",
             "owner_name",
             "owner_type",
             "owner_entity_id",
@@ -103,6 +107,40 @@ class ChatterloopBotSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = fields
+
+    def get_control_key(self, obj):
+        """The key the control endpoint accepts.
+
+        ON THE BOT, not behind a second call: the URL is useless without it,
+        and a pair of links somebody cannot actually use is worse than not
+        showing them. The cost is real and accepted - this credential now
+        appears in every bot listing, so it reaches logs, caches and
+        screenshots the way any displayed secret does. It is scoped to one bot
+        and one power, and `POST control-key` rotates it if a copy escapes.
+
+        `ensure_control_key` WRITES on first use. New bots get theirs at mint
+        time so this is normally a pure read; the write is the one-off for
+        bots that predate the feature.
+        """
+        from .presence import ensure_control_key
+
+        return ensure_control_key(obj)
+
+    def get_control_url(self, obj):
+        """The bot's control endpoint, ready to copy.
+
+        Built from the REQUEST when there is one, so it names the host
+        somebody is actually using, and falls back to NEON_PUBLIC_BASE_URL for
+        callers with no request - a management command, a task.
+        """
+        from django.conf import settings
+
+        from .presence import control_url
+
+        request = self.context.get("request")
+        if request is not None:
+            return request.build_absolute_uri(control_url(obj))
+        return control_url(obj, getattr(settings, "NEON_PUBLIC_BASE_URL", ""))
 
     def get_running(self, obj):
         """Whether a supervisor currently holds this bot's lease.

@@ -56,6 +56,7 @@ from .external_models import (
     Token,
 )
 from .models import ChatterloopBot, ChatterloopToken
+from .presence import ensure_control_key
 
 logger = logging.getLogger(__name__)
 
@@ -351,6 +352,13 @@ def mint_bot(
 
     credential.provisioned_at = stamp
     credential.save(update_fields=["provisioned_at"])
+
+    # The control key, issued now rather than on first read. The serializer
+    # falls back to minting one lazily, but that would make a plain GET write
+    # - once per bot that predates this - and a read path that writes is worth
+    # avoiding for every bot created from here on.
+    ensure_control_key(bot)
+
 
     # Carried on the instance only, never persisted in the clear. The caller
     # shows it once; after that `token.token` decrypts it from storage.

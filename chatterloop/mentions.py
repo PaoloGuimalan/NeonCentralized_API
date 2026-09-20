@@ -102,3 +102,40 @@ def strip_mentions(text, handles):
 
     stripped = MENTION_PATTERN.sub(replace, text)
     return re.sub(r"\s{2,}", " ", stripped).strip()
+
+
+# The command token, as chatterloop's `commandParser.js` matches it.
+#
+# ANYWHERE A WORD STARTS, like a mention: "@juanlazy /summarize the thread" is
+# one thought, and the parser stopped anchoring to the start of the message for
+# exactly that case. `(^|\s)` is what keeps a slash inside a word out, so
+# "and/or" is untouched.
+#
+# NOT a second copy of that grammar. The server has already decided whether a
+# message IS a command and told us its name; this only removes the token it
+# parsed, so the worst a disagreement can do is leave a word in the query
+# rather than change which command ran. The escape hatch "//summarize" is a
+# literal, not a command, and the negative lookbehind keeps it that way.
+COMMAND_PATTERN = re.compile(
+    r"(^|\s)/(?<!//)([A-Za-z0-9-]{1,32})(?::([A-Za-z0-9._-]{1,50}))?(?=$|\s)"
+)
+
+
+def strip_command(text):
+    """Remove a leading `/command` or `/command:target`.
+
+    The ARGUMENTS are the question. "/summarize the pricing thread" asks about
+    the pricing thread, and leaving the token in sends "summarize" to retrieval
+    - a term about the instruction rather than about anything being asked for.
+
+    A message that is only the command leaves an empty string, which is a
+    legitimate answer: "/members" carries no arguments at all.
+
+    Only the FIRST token goes, matching the parser: one command per message,
+    and a second "/summarize" further in is somebody writing about one.
+    """
+    if not text:
+        return ""
+    # The captured leading whitespace goes with it, so "@ana /summarize x"
+    # leaves "@ana x" rather than "@ana  x".
+    return COMMAND_PATTERN.sub("", text, count=1).strip()

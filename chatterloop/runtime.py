@@ -68,7 +68,12 @@ from .frames import (
     parse_envelope,
     parse_messages_list,
 )
-from .mentions import is_addressed_to, normalise_handle, strip_mentions
+from .mentions import (
+    is_addressed_to,
+    normalise_handle,
+    strip_command,
+    strip_mentions,
+)
 from .triggers import Trigger, TriggerReason, TriggerSource
 
 logger = logging.getLogger(__name__)
@@ -124,6 +129,7 @@ class BotRuntime:
         reply_probe_window=25,
         answer_replies=True,
         answer_dms=True,
+        commands=(),
         only_live_events=True,
         started_at_ms=None,
     ):
@@ -148,6 +154,15 @@ class BotRuntime:
         # The kill switch for treating every message in a DM as addressed. Off,
         # a DM is judged exactly like a group.
         self.answer_dms = answer_dms
+
+        # The bot's ARSENAL: the command names it answers to.
+        #
+        # Empty by default, and that is the safe default rather than a missing
+        # feature. A `/command` frame reaches every bot in the conversation, so
+        # a bot that treated an unknown one as addressed would wake up for
+        # somebody else's command - and in a room with several bots, all of
+        # them would answer at once.
+        self.commands = frozenset(str(name).lower() for name in commands if name)
 
         self.only_live_events = only_live_events
         self.started_at_ms = (
@@ -222,6 +237,30 @@ class BotRuntime:
         # comes back on its own channel, so counting these would bury the
         # ignore reasons that mean something under one that never does.
         if self.identity.is_self(payload.entity_id):
+            return
+
+        # A command, FIRST. It is the most specific thing a message can be, and
+        # reading one as an ordinary mention would hand the arguments to the
+        # model as though they were a question.
+        #
+        # Falls through when the command is not ours: a message like
+        # "/unknown @assistant what is this" did still name the bot, and the
+        # mention path below is the right answer for it.
+        if payload.command is not None and self._command_is_ours(payload.command):
+            trigger = Trigger(
+                source=TriggerSource.MESSAGE,
+                reason=TriggerReason.COMMAND,
+                author_entity_id=payload.entity_id,
+                conversation_id=payload.conversation_id,
+                command_name=payload.command.name,
+                command_target=payload.command.target,
+                occurred_at=envelope.date_time,
+            )
+            if payload.mentioner is not None:
+                trigger.author_handle = normalise_handle(payload.mentioner.username)
+                trigger.realm_name = payload.mentioner.realm_name
+                trigger.is_single = payload.mentioner.is_single
+            self._guard(trigger, self._resolve_command)
             return
 
         if payload.mentioner is not None:
@@ -466,6 +505,65 @@ class BotRuntime:
         # show it - most likely the message landed outside the window.
         logger.info(
             "mention reported but not found in history for %s", trigger.conversation_id
+        )
+
+    def _command_is_ours(self, command):
+        """Whether this bot should act on a command somebody typed.
+
+        Two independent gates, and BOTH have to pass:
+
+        THE TARGET. "/summarize:neon" names one bot. Every bot in the
+        conversation sees the frame, so a bot that ignored the target would
+        answer a command addressed to a different one - which is the exact
+        ambiguity the `:handle` suffix exists to remove. An untargeted command
+        is offered to every bot that declares it, which is what makes
+        "/summarize" work in a room with one summarizer in it.
+
+        THE ARSENAL. A name this bot does not declare is somebody else's
+        command, or a typo. Either way it is not ours, and answering it would
+        be a bot speaking up about something it cannot do.
+        """
+        if command.target and command.target not in self.identity.handles:
+            return False
+        return command.name in self.commands
+
+    def _resolve_command(self, trigger):
+        """Find the message that carried the command.
+
+        Searched for by its TEXT rather than taken as the author's newest
+        message: between the command being typed and this fetch completing the
+        same person may well have typed something else, and answering a command
+        with the wrong arguments is worse than not finding it.
+        """
+        history, _ = self.api.fetch_messages(
+            self.token, trigger.conversation_id, self.history_window
+        )
+        if not history:
+            return
+
+        prefix = "/" + trigger.command_name
+        for message in reversed(history):
+            if self.identity.is_self(message["sender_entity_id"]):
+                continue
+            if str(message["sender_entity_id"]) != str(trigger.author_entity_id):
+                continue
+            if not str(message["content"]).lstrip().lower().startswith(prefix):
+                continue
+            self._attach(trigger, message)
+            # The ARGUMENTS are the question, not the whole line. Left as typed,
+            # "/summarize the pricing thread" would send the word "summarize"
+            # to retrieval - a term that is about the instruction rather than
+            # about anything the bot is being asked to find.
+            #
+            # Applied on top of what _attach already did, so a command that
+            # also names the bot loses both the token and the address.
+            trigger.query = strip_command(trigger.query)
+            return
+
+        logger.info(
+            "command /%s reported but not found in history for %s",
+            trigger.command_name,
+            trigger.conversation_id,
         )
 
     def _resolve_dm(self, trigger):

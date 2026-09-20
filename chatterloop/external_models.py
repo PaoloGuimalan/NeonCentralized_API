@@ -378,3 +378,56 @@ class EntityPermission(models.Model):
 
     def __str__(self):
         return f"{self.effect} {self.permission} -> {self.entity_id}"
+
+
+class BotCommand(models.Model):
+    """`bot_commands` - the commands a bot declares.
+
+    WHY NEON READS THIS AT ALL
+    --------------------------
+    chatterloop runs the `system` and `webhook` categories itself and never
+    tells us about them. A `bot` command is different: nothing runs it, and the
+    only trace is a field on the `messages_list` frame saying one was typed.
+    Whether the bot has that command, and what it does about it, is the bot's
+    own business - which makes this table the bot's ARSENAL.
+
+    Reading it rather than keeping a Neon-side list is what stops the two
+    disagreeing. It is the same table `/help` lists and the same one the
+    composer's menu is built from, so what a person is told exists and what
+    the bot actually answers cannot drift apart.
+
+    Only the columns Neon reads are declared - an unmanaged model does not have
+    to describe every one, and the rest belong to developer_service.
+    """
+
+    id = models.CharField(max_length=40, primary_key=True)
+    bot = models.ForeignKey(
+        Bot,
+        db_column="bot_id",
+        on_delete=models.DO_NOTHING,
+        related_name="commands",
+    )
+    name = models.CharField(max_length=32)
+    description = models.CharField(max_length=200)
+    # "system" | "webhook" | "bot". Only "bot" is the bot's own to run - see
+    # the class docstring - but Neon WRITES "webhook" rows too, for /wake and
+    # /sleep, which point back at Neon's own presence endpoint.
+    category = models.CharField(max_length=20)
+    responds = models.CharField(max_length=20)
+    webhook_url = models.CharField(max_length=500)
+    # {payload, headers, query, params}. The headers carry the shared secret
+    # that authenticates the call BACK to Neon; chatterloop stores it in plain
+    # text, which is why the endpoint treats it as a bearer credential and
+    # nothing more.
+    webhook_request = models.JSONField()
+    is_active = models.BooleanField()
+    # Every column here is NOT NULL with no database default, so Neon supplies
+    # all of them - chatterloop's own defaults are Django-level.
+    created_at = models.DateTimeField()
+
+    class Meta:
+        managed = False
+        db_table = "bot_commands"
+
+    def __str__(self):
+        return f"/{self.name} -> {self.bot_id}"

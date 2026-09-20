@@ -128,11 +128,13 @@ class Decision:
 RESPOND_MENTIONED = Decision(Verdict.RESPOND, "addressed by mention")
 RESPOND_REPLIED_TO = Decision(Verdict.RESPOND, "direct reply to the bot")
 RESPOND_DM = Decision(Verdict.RESPOND, "message in a direct conversation")
+RESPOND_COMMAND = Decision(Verdict.RESPOND, "a command the bot declares")
 
 _RESPOND_BY_REASON = {
     TriggerReason.MENTION: RESPOND_MENTIONED,
     TriggerReason.REPLY: RESPOND_REPLIED_TO,
     TriggerReason.DM: RESPOND_DM,
+    TriggerReason.COMMAND: RESPOND_COMMAND,
 }
 
 
