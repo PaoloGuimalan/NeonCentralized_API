@@ -39,6 +39,7 @@ from .client import (
     ChatterloopAPIError,
     TokenRejected,
     fetch_messages,
+    fetch_moderation,
     fetch_thread,
     post_comment,
     send_message,
@@ -47,6 +48,7 @@ from .models import ChatterloopBot
 from .ownership import conversation_owner
 from .authors import is_bot_entity
 from .context import CHAIN_LIMIT, RECENT_LIMIT, build, question_for
+from . import media
 from .policy import AddressedOnlyPolicy, build_store
 from .runtime import BotIdentity
 from .triggers import Trigger, TriggerSource
@@ -300,8 +302,11 @@ def _conversation_context(bot, token, trigger):
     existed.
     """
     if not trigger.conversation_id:
-        # A comment. Threading there is a different shape and a different route.
-        return [], trigger.query
+        # A comment. Threading there is a different shape and a different
+        # route - but the post it sits under is readable, and a bot answering
+        # a comment about a photo could previously see neither the photo nor
+        # the caption.
+        return _post_context(bot, token, trigger), trigger.query
 
     recent, chain = [], []
 
@@ -332,6 +337,11 @@ def _conversation_context(bot, token, trigger):
         except Exception:
             logger.exception("bot %s could not read the reply thread", bot.handle)
 
+    # What the media in those messages actually is, before the turns are built
+    # from their content. Without this a photo reaches the model as a CDN URL
+    # and a voice note as a CDN URL, and a model shown a URL answers the URL.
+    _apply_media_context(bot, token, recent, chain)
+
     identity = BotIdentity(bot.entity_id, bot.verified_handle or bot.handle)
     turns = build(recent, chain, trigger.message_id, identity=identity)
 
@@ -350,6 +360,82 @@ def _conversation_context(bot, token, trigger):
         "; quoting the replied-to message" if question != trigger.query else "",
     )
     return turns, question
+
+
+def _apply_media_context(bot, token, *message_lists):
+    """Rewrite every media message's URL with what the media is.
+
+    ONE CALL for both histories. The recent window and the reply chain overlap,
+    and asking about each separately would pay twice for the same attachment.
+
+    NEVER FATAL, and never a wait. Moderation is asynchronous, so a photo sent
+    seconds ago comes back `pending` - that status reaches the model as
+    "[image] Still being processed.", which lets the bot say so instead of
+    ignoring the attachment or inventing what is in it. The same is true if
+    this read fails outright: `media.apply` still replaces the URL with the
+    bare kind, which is more than the model had before.
+    """
+    messages = [message for group in message_lists for message in group or []]
+    wanted = media.needs_context(messages)
+    if not wanted:
+        return
+
+    records = []
+    try:
+        records = fetch_moderation(token, message_ids=wanted)
+    except TokenRejected:
+        # Not re-raised. A missing scope here is a bot that cannot read
+        # moderation, not one that cannot answer - and the caller's own reads
+        # already succeeded, so the token is good for everything else.
+        logger.info(
+            "bot %s: no access to moderation; answering without media context",
+            bot.handle,
+        )
+    except Exception:
+        logger.exception("bot %s could not read media context", bot.handle)
+
+    media.apply(messages, records)
+    logger.info(
+        "bot %s: media context for %s attachment(s), %s described",
+        bot.handle,
+        len(wanted),
+        len(records),
+    )
+
+
+def _post_context(bot, token, trigger):
+    """What the post a comment sits under actually contains.
+
+    A comment thread is ABOUT the post, and until now a bot answering one could
+    see the comment text and nothing else - not the caption, and certainly not
+    what was in the image everybody was talking about. One call, because a post
+    and its attachments come back together.
+
+    Returns a turn list, empty when there is nothing to say. Shaped as a turn
+    rather than folded into the question so the model reads it as background
+    that somebody else established, not as part of what it was just asked.
+    """
+    if not trigger.post_id:
+        return []
+
+    try:
+        records = fetch_moderation(token, post_id=trigger.post_id)
+    except TokenRejected:
+        logger.info(
+            "bot %s: no access to moderation; commenting without post context",
+            bot.handle,
+        )
+        return []
+    except Exception:
+        logger.exception("bot %s could not read the post", bot.handle)
+        return []
+
+    summary = media.summarise(records)
+    if not summary:
+        return []
+
+    logger.info("bot %s: %s record(s) of post context", bot.handle, len(records))
+    return [{"role": "user", "content": f"The post being discussed:\n{summary}"}]
 
 
 def _retrieve(bot, conversation, trigger):

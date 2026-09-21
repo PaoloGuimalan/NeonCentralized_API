@@ -214,6 +214,90 @@ def fetch_thread(token, conversation_id, message_id, limit=20):
     )
 
 
+def fetch_moderation(token, *, message_ids=None, post_id="", comment_ids=None):
+    """What the platform already knows about the media in these things.
+
+    A message carrying an upload stores the CDN URL in `content`, so a model
+    shown `content` is shown a URL - and a model shown a URL answers the URL.
+    The moderation pipeline has already transcribed, captioned and read the
+    text out of that same file; this is how the bot gets at it.
+
+    One kind per call, matching the three routes. They are separate because
+    each is gated on the scope its underlying read needs - a message is
+    `messages.read`, a post or comment is `notifications.read` - and a bot
+    holding only one of those should still get the half it can have.
+
+    Returns rows as they arrived, normalised. `status` is on every row and is
+    the field that matters most: analysis is asynchronous, so a message seconds
+    old comes back `pending` with nothing else, and that is worth saying to the
+    model rather than hiding.
+    """
+    if message_ids:
+        ids = [str(value) for value in message_ids if value]
+        if not ids:
+            return []
+        payload = request(
+            "GET", "/v1/moderation/messages", token,
+            params={"messageID": ids[:MODERATION_ID_CAP]},
+        )
+    elif post_id:
+        payload = request("GET", f"/v1/moderation/posts/{post_id}", token)
+    elif comment_ids:
+        ids = [str(value) for value in comment_ids if value]
+        if not ids:
+            return []
+        payload = request(
+            "GET", "/v1/moderation/comments", token,
+            params={"commentID": ids[:MODERATION_ID_CAP]},
+        )
+    else:
+        return []
+
+    return _moderation_from(payload)
+
+
+# The route's own cap. Asking for more is not an error there - the extra ids
+# are dropped - but sending them is a request nobody can answer, and a caller
+# that trims knows which ids it gave up on.
+MODERATION_ID_CAP = 50
+
+
+def _moderation_from(payload):
+    """Rows into dicts, skipping anything malformed.
+
+    Same rule as `_messages_from`: one unrecognised row costs one row, never
+    the batch. This is another service's data and a shape change must degrade
+    rather than stop the bot - and here it must degrade to "no context", which
+    is exactly where the bot was before this existed.
+    """
+    records = []
+    for row in payload.get("moderation") or []:
+        if not isinstance(row, dict):
+            continue
+        target_id = row.get("target_id")
+        if not target_id:
+            continue
+        records.append(
+            {
+                "target_id": str(target_id),
+                "source_type": str(row.get("source_type") or ""),
+                "content_type": str(row.get("content_type") or ""),
+                # Absent unless the document said so - `None` means nothing
+                # classified the audio, which is not the same as "not music".
+                "is_music": row.get("is_music"),
+                # Defaulted to "pending" for the same reason the route does:
+                # something is there and nothing has said it finished.
+                "status": str(row.get("status") or "pending"),
+                "text": str(row.get("text") or ""),
+                "transcription": str(row.get("transcription") or ""),
+                "caption": str(row.get("caption") or ""),
+                "shown_text": str(row.get("shown_text") or ""),
+                "language": str(row.get("language") or ""),
+            }
+        )
+    return records
+
+
 def conversation_type(token, conversation_id):
     """Whether this is a DM: "single", something else, or "" if unresolvable.
 
