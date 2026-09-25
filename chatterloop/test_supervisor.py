@@ -429,3 +429,92 @@ class AnswerTaskTests(TestCase):
 
     def test_an_unknown_bot_is_a_no_op(self):
         answer_trigger("no-such-bot", self.trigger().to_payload())
+
+    # ------------------------------------------------ a post sent to the bot
+
+    POST_ID = "762856157557296690215357838746"
+    POST_RECORDS = [
+        {"target_id": POST_ID, "source_type": "post", "content_type": "text",
+         "status": "done", "text": "our new office", "transcription": "",
+         "caption": "", "shown_text": "", "language": "en", "is_music": None},
+        {"target_id": "att-1", "source_type": "post_attachment",
+         "content_type": "image", "status": "done", "text": "",
+         "transcription": "", "caption": "a room with desks", "shown_text": "",
+         "language": "en", "is_music": None},
+    ]
+
+    def post_message(self, **overrides):
+        message = {"message_id": "m1", "created_at": 900, "sender_entity_id": "entity-human",
+                   "sender_handle": "ana", "message_type": "post",
+                   "content": self.POST_ID, "is_reply": False, "replying_to": "",
+                   "reply_target": None}
+        message.update(overrides)
+        return message
+
+    def run_with_post(self, message, trigger, moderation):
+        with patch("chatterloop.tasks.fetch_moderation", **moderation) as fetch:
+            self.run_task(trigger, recent=[message], chain=[dict(message)])
+        return fetch
+
+    def test_a_post_sent_alone_is_what_the_bot_is_asked_about(self):
+        """The message's content is the post's id, and it IS the question -
+        so the model used to be asked a thirty-digit number."""
+        trigger = self.trigger(reason=TriggerReason.DM, text=self.POST_ID, query=self.POST_ID)
+
+        fetch = self.run_with_post(
+            self.post_message(), trigger, {"return_value": self.POST_RECORDS}
+        )
+
+        fetch.assert_called_once()
+        self.assertEqual(fetch.call_args.kwargs, {"post_id": self.POST_ID})
+        self.assertEqual(
+            self.llm.calls[0]["content"],
+            "[Shared a post]\n[text] our new office.\n[image] a room with desks.",
+        )
+        # The mirror in Neon reads as the post, not as its id.
+        inbound = Message.objects.filter(message_type="text").get()
+        self.assertTrue(inbound.content.startswith("[Shared a post]"))
+
+    def test_a_note_sent_with_a_post_is_asked_about_the_post(self):
+        message = self.post_message(
+            message_type="text", content="@helper is this ok?", is_reply=True,
+            reply_target={"type": "post", "id": self.POST_ID},
+        )
+        trigger = self.trigger(text="@helper is this ok?", query="is this ok?")
+
+        self.run_with_post(message, trigger, {"return_value": self.POST_RECORDS})
+
+        self.assertEqual(
+            self.llm.calls[0]["content"],
+            "[About a post]\n[text] our new office.\n[image] a room with desks."
+            "\n\nis this ok?",
+        )
+
+    def test_a_post_the_bot_may_not_read_is_still_not_an_id(self):
+        """The post route is gated on notifications.read. A chat-only bot still
+        answers - it just says a post is there rather than what is in it."""
+        trigger = self.trigger(reason=TriggerReason.DM, text=self.POST_ID, query=self.POST_ID)
+
+        self.run_with_post(
+            self.post_message(), trigger,
+            {"side_effect": TokenRejected("missing scope")},
+        )
+
+        self.assertEqual(self.llm.calls[0]["content"], "[Shared a post]")
+
+    def test_an_earlier_shared_post_is_described_in_the_history(self):
+        earlier = self.post_message(message_id="m0", created_at=100)
+        question = {"message_id": "m1", "created_at": 900, "sender_entity_id": "entity-human",
+                    "message_type": "text", "content": "@helper thoughts on that?",
+                    "reply_target": None}
+        trigger = self.trigger(text="@helper thoughts on that?", query="thoughts on that?")
+
+        with patch("chatterloop.tasks.fetch_moderation", return_value=self.POST_RECORDS):
+            self.run_task(trigger, recent=[earlier, question], chain=[])
+
+        history = [turn["content"] for turn in self.llm.calls[0]["history"]]
+        self.assertEqual(
+            history,
+            ["[Shared a post]\n[text] our new office.\n[image] a room with desks."],
+        )
+        self.assertEqual(self.llm.calls[0]["content"], "thoughts on that?")

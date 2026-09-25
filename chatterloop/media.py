@@ -58,7 +58,7 @@ def needs_context(messages):
     decided by one value rather than by two rules that can disagree.
 
     "notif" is excluded: those are strings this platform wrote, not anything
-    somebody uploaded.
+    somebody uploaded. So is "post", a shared post - `shared_posts` handles it.
     """
     ids = []
     seen = set()
@@ -159,7 +159,11 @@ def describe(record):
 
 def _is_media(message):
     message_type = str(message.get("message_type") or "text").lower()
-    return message_type not in ("", "text", "notif")
+    # "post" is a post SHARED into the chat: its content is the post's id, not
+    # an upload, and what it is comes from the post's own moderation - see
+    # `shared_posts`. The message route knows nothing about it, and asking
+    # there left the model reading a bare "[post]".
+    return message_type not in ("", "text", "notif", "post")
 
 
 def _label(record):

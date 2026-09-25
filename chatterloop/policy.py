@@ -38,6 +38,7 @@ import time
 from collections import OrderedDict
 from enum import StrEnum
 
+from .authors import is_system_entity
 from .triggers import TriggerReason
 
 logger = logging.getLogger(__name__)
@@ -333,6 +334,12 @@ class AddressedOnlyPolicy:
         # 2. Never answer an entity on the ignore list (other bots).
         if str(trigger.author_entity_id) in self.ignore_entity_ids:
             return Decision(Verdict.IGNORE, "author is on the ignore list")
+
+        #    Nor the System bot, whatever `allow_bot_conversations` says. The
+        #    runtime already drops its frames; this is the backstop for any
+        #    trigger path that reaches here another way.
+        if is_system_entity(trigger.author_entity_id):
+            return Decision(Verdict.IGNORE, "author is the System bot")
 
         # 3. At-least-once delivery, plus a reply probe that returns a WINDOW
         #    of recent replies, means repeats are normal rather than

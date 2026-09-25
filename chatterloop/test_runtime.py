@@ -10,6 +10,7 @@ import uuid
 
 from django.test import SimpleTestCase, TestCase
 
+from chatterloop.authors import SYSTEM_BOT_ENTITY_ID
 from chatterloop.client import ChatterloopAPIError, TokenRejected
 from chatterloop.frames import (
     EVENT_MESSAGES_LIST,
@@ -206,6 +207,36 @@ class RoutingTests(SimpleTestCase):
 
         self.assertEqual(dispatched, [])
         self.assertEqual(api.calls, [])
+
+    def test_a_system_message_costs_no_read_at_all(self):
+        """The System bot's notices and command answers are for nobody - not
+        even in a DM with the bot, where every other sender is answered."""
+        api = FakeApi(messages=[message(sender=SYSTEM_BOT_ENTITY_ID)], conv_type="single")
+        runtime, dispatched = build_runtime(api)
+
+        runtime.handle_envelope(messages_frame(sender=SYSTEM_BOT_ENTITY_ID))
+
+        self.assertEqual(dispatched, [])
+        self.assertEqual(api.calls, [])
+
+    def test_a_dm_answers_the_person_not_the_system_notice_after_them(self):
+        """The System bot's answer to their command can land after their
+        message and before the read - it is newer, and not what they said."""
+        api = FakeApi(
+            messages=[
+                message(message_id="m1", content="hey there"),
+                message(message_id="m2", sender=SYSTEM_BOT_ENTITY_ID,
+                        content="Only the first 3 commands ran.", handle="system"),
+            ],
+            conv_type="single",
+        )
+        runtime, dispatched = build_runtime(api)
+
+        runtime.handle_envelope(messages_frame())
+
+        self.assertEqual(len(dispatched), 1)
+        self.assertEqual(dispatched[0].message_id, "m1")
+        self.assertEqual(dispatched[0].query, "hey there")
 
     def test_a_deletion_ping_is_not_a_delivery(self):
         api = FakeApi()
@@ -417,6 +448,25 @@ class PolicyTests(SimpleTestCase):
         )
         decision = policy.evaluate(self.trigger(author_entity_id="other-bot"))
         self.assertEqual(decision.verdict, Verdict.IGNORE)
+
+    def test_the_system_bot_is_never_answered_even_by_a_collaborating_bot(self):
+        """It is a bot, so `allow_bot_conversations` alone would let it through.
+        What it posts is never addressed to anyone."""
+        policy = AddressedOnlyPolicy(
+            self.identity,
+            store=self.store,
+            is_bot_author=lambda entity_id: True,
+            allow_bot_conversations=True,
+        )
+
+        decision = policy.evaluate(self.trigger(author_entity_id=SYSTEM_BOT_ENTITY_ID))
+
+        self.assertEqual(decision.verdict, Verdict.IGNORE)
+        self.assertIn("System bot", decision.reason)
+        # And only the System bot: another bot still gets through the toggle.
+        self.assertTrue(
+            policy.evaluate(self.trigger(author_entity_id="other-bot")).should_respond
+        )
 
     def test_a_redelivered_trigger_is_ignored(self):
         trigger = self.trigger()

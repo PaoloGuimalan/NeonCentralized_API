@@ -59,6 +59,7 @@ cannot date is recoverable; a burst is not.
 import logging
 import time
 
+from .authors import is_system_entity
 from .client import ChatterloopAPIError, TokenRejected
 from .frames import (
     EVENT_MESSAGES_LIST,
@@ -237,6 +238,13 @@ class BotRuntime:
         # comes back on its own channel, so counting these would bury the
         # ignore reasons that mean something under one that never does.
         if self.identity.is_self(payload.entity_id):
+            return
+
+        # The System bot, always - whatever `allow_bot_conversations` says (see
+        # `authors.is_system_entity`). Dropped here, before any read, for the
+        # same reason as the bot's own messages: a system notice follows every
+        # command somebody runs, and none of them is for the bot.
+        if is_system_entity(payload.entity_id):
             return
 
         # A command, FIRST. It is the most specific thing a message can be, and
@@ -582,6 +590,11 @@ class BotRuntime:
 
         for message in reversed(history):
             if self.identity.is_self(message["sender_entity_id"]):
+                continue
+            # "The other side" is the person, not the System bot - whose answer
+            # to their command can land after their message and before this
+            # read, and is not what they said.
+            if is_system_entity(message["sender_entity_id"]):
                 continue
             trigger.author_handle = normalise_handle(message["sender_handle"])
             self._attach(trigger, message)

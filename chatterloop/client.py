@@ -391,9 +391,26 @@ def _messages_from(payload, conversation_id):
                 "message_type": str(row.get("message_type") or "text"),
                 "is_reply": bool(row.get("is_reply")),
                 "replying_to": str(row.get("replying_to") or ""),
+                "reply_target": _reply_target_from(row.get("reply_target")),
             }
         )
     return messages
+
+
+def _reply_target_from(value):
+    """`{"type", "id"}` for what a message replies to, or None.
+
+    The only field that says a note is about a POST (or a Moment or Thought):
+    `replying_to` is a message id, so for those it is empty. Without this, a
+    post sent with a note reached the bot as a note about nothing.
+    """
+    if not isinstance(value, dict):
+        return None
+    kind = str(value.get("type") or "").strip().lower()
+    target_id = str(value.get("id") or "").strip()
+    if not kind or not target_id:
+        return None
+    return {"type": kind, "id": target_id}
 
 
 def _mentions_from(payload, key, kind):

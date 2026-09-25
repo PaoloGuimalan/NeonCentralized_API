@@ -51,6 +51,16 @@ class NeedsContextTests(SimpleTestCase):
 
         self.assertEqual(media.needs_context(messages), [])
 
+    def test_a_shared_post_is_not_media(self):
+        """Its content is a post id, read from the post's own moderation by
+        `shared_posts`. Asking the message route about it finds nothing, and
+        `apply` would then overwrite it with a bare "[post]"."""
+        messages = [message(message_type="post", content="762856157557296690215357838746")]
+
+        self.assertEqual(media.needs_context(messages), [])
+        media.apply(messages, [])
+        self.assertEqual(messages[0]["content"], "762856157557296690215357838746")
+
     def test_every_upload_kind_is_media(self):
         messages = [
             message("a", "image/jpeg"),

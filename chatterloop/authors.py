@@ -31,6 +31,24 @@ logger = logging.getLogger(__name__)
 
 CACHE_SIZE = 4096
 
+# The System bot, as every chatterloop service agrees on it: a fixed id written
+# by user_service's bot/migrations/0004_system_bot.py, and the sender of every
+# notice and built-in command answer (server/reusables/hooks/systemNotice.js,
+# worker_service's systemreply.go).
+SYSTEM_BOT_ENTITY_ID = "00000000-0000-4000-8000-000000000002"
+
+
+def is_system_entity(entity_id):
+    """True for the System bot. Bots never answer it.
+
+    Deliberately NOT left to `is_bot_entity` and the `allow_bot_conversations`
+    toggle. The System bot is a bot - it has a `bot_bot` row - so a bot allowed
+    to talk to other bots would answer it. But nothing it posts is addressed to
+    anyone: it is a command's result or a notice about one, and a bot replying
+    to it is a bot replying to the platform.
+    """
+    return str(entity_id or "").strip().lower() == SYSTEM_BOT_ENTITY_ID
+
 
 @lru_cache(maxsize=CACHE_SIZE)
 def _lookup(entity_id):

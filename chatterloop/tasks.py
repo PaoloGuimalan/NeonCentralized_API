@@ -48,7 +48,7 @@ from .models import ChatterloopBot
 from .ownership import conversation_owner
 from .authors import is_bot_entity
 from .context import CHAIN_LIMIT, RECENT_LIMIT, build, question_for
-from . import media
+from . import media, shared_posts
 from .policy import AddressedOnlyPolicy, build_store
 from .runtime import BotIdentity
 from .triggers import Trigger, TriggerSource
@@ -192,7 +192,6 @@ def answer_trigger(bot_id, payload):
         return
 
     conversation = _mirror_conversation(bot, trigger)
-    _mirror_message(conversation, trigger.text or trigger.query, "text")
 
     # Two sources covering different gaps. The conversation is what was
     # actually said - recency plus this reply's lineage. Retrieval is for what
@@ -203,6 +202,10 @@ def answer_trigger(bot_id, payload):
     # reads last and answers from.
     try:
         turns, question = _conversation_context(bot, token_value, trigger)
+        # Mirrored AFTER the conversation is read: a post sent without a note
+        # arrives as its bare id, and the read is what turns that into the
+        # post - for the mirror and for retrieval alike.
+        _mirror_message(conversation, trigger.text or trigger.query, "text")
         context = _retrieve(bot, conversation, trigger) + turns
     except TokenRejected as ex:
         # Handled HERE rather than swallowed in the reader. The token is dead,
@@ -342,6 +345,17 @@ def _conversation_context(bot, token, trigger):
     # and a voice note as a CDN URL, and a model shown a URL answers the URL.
     _apply_media_context(bot, token, recent, chain)
 
+    # The same for a post somebody SENT here, which is a post id rather than
+    # an upload and is read from the post's own moderation. The triggering
+    # message is left out of the turns, so when it is the one carrying the
+    # post, the post has to go into the question as well.
+    carried = _apply_post_context(bot, token, trigger.message_id, recent, chain)
+    if trigger.message_id in carried:
+        trigger.query = shared_posts.ask(trigger.query, carried[trigger.message_id])
+        if carried[trigger.message_id][1]:
+            # Sent alone, the text was the id too - and the mirror writes it.
+            trigger.text = trigger.query
+
     identity = BotIdentity(bot.entity_id, bot.verified_handle or bot.handle)
     turns = build(recent, chain, trigger.message_id, identity=identity)
 
@@ -401,6 +415,53 @@ def _apply_media_context(bot, token, *message_lists):
         len(wanted),
         len(records),
     )
+
+
+def _apply_post_context(bot, token, trigger_message_id, *message_lists):
+    """Rewrite every message carrying a shared post with what the post is.
+
+    Returns `shared_posts.apply`'s map of what it rewrote, by message id.
+
+    NEVER FATAL, like the media context. The post route is gated on
+    `notifications.read`, which a chat-only bot may not hold, and a failed
+    read must cost the bot its view of the post - not its answer. A post that
+    could not be read still loses its bare id: it reads "[Shared a post]".
+    """
+    messages = [message for group in message_lists for message in group or []]
+    post_ids = shared_posts.wanted(messages, first=trigger_message_id)
+    if not post_ids:
+        return {}
+
+    known = {}
+    for post_id in post_ids:
+        try:
+            known[post_id] = fetch_moderation(token, post_id=post_id)
+        except TokenRejected:
+            # Not re-raised, for the reason in `_apply_media_context`. And not
+            # asked again for the next post: it is the same missing scope.
+            logger.info(
+                "bot %s: no access to post moderation; answering without post context",
+                bot.handle,
+            )
+            break
+        except ChatterloopAPIError as ex:
+            if ex.status_code == 404:
+                # Deleted since it was sent. Worth saying, so the bot does not
+                # talk about it as if it could see it.
+                known[post_id] = shared_posts.GONE
+            else:
+                logger.warning("bot %s could not read post %s: %s", bot.handle, post_id, ex)
+        except Exception:
+            logger.exception("bot %s could not read post %s", bot.handle, post_id)
+
+    rewritten = shared_posts.apply(messages, known)
+    logger.info(
+        "bot %s: post context for %s shared post(s), %s read",
+        bot.handle,
+        len(post_ids),
+        len(known),
+    )
+    return rewritten
 
 
 def _post_context(bot, token, trigger):
